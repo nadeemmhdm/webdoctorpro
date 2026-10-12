@@ -38,3 +38,16 @@ test('public source does not hardcode an assistant model name', async () => {
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /gpt-oss|qwen|llama3|gemini|claude/i);
 });
+
+
+test('v1.3.1 fixes Stars checkout, admin lock, gifts and persistent DNS proof', async () => {
+  const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
+  assert.match(source, /createInvoiceLink/);
+  assert.match(source, /subscription_period: SUBSCRIPTION_PERIOD/);
+  assert.match(source, /ADMIN_TELEGRAM_ID = '8984229401'/);
+  assert.ok(source.includes("cmd.startsWith('/admin')"));
+  assert.match(source, /user_gifts/);
+  assert.match(source, /giftopen:/);
+  assert.match(source, /9999-12-31T23:59:59\.999Z/);
+  assert.match(source, /adminSetExactPlan/);
+});
