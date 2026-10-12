@@ -13,5 +13,5 @@
       "database_id": "4aeda3a8-38d3-48f2-8cef-a4759671879c"
     }
   ],
-  "triggers": { "crons": ["0 * * * *"] }
+  "triggers": { "crons": ["* * * * *"] }
 }
