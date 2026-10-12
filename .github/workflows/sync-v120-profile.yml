@@ -1,0 +1,32 @@
+name: Sync WEB DOCTOR PRO v1.2 Profile
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/sync-v120-profile.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trigger production profile sync
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 5 --retry-delay 2 --connect-timeout 10 \
+            "https://webdoctorpro.nadeemmhdm-ai.workers.dev/health"
+      - name: Remove one-time workflow
+        run: |
+          set -euo pipefail
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          rm -f .github/workflows/sync-v120-profile.yml
+          git add -A
+          git commit -m "chore: remove v1.2 profile sync workflow"
+          git push
