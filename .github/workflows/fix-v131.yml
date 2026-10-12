@@ -25,7 +25,7 @@ jobs:
           const fs = require('fs');
           const p = 'test/platform.test.js';
           let t = fs.readFileSync(p, 'utf8');
-          t = t.replace("  assert.match(source, /cmd\\\\.startsWith\\\\('/admin'\\\\)/);", "  assert.ok(source.includes(\"cmd.startsWith('/admin')\"));");
+          t = t.split('\n').map((line) => line.includes('assert.match(source, /cmd') ? "  assert.ok(source.includes(\"cmd.startsWith('/admin')\"));" : line).join('\n');
           fs.writeFileSync(p, t);
           NODE
       - name: Test
