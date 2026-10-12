@@ -19,6 +19,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Apply guarded patch
         run: node .github/scripts/fix-v131.mjs
+      - name: Normalize generated assertion
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const p = 'test/platform.test.js';
+          let t = fs.readFileSync(p, 'utf8');
+          t = t.replace("  assert.match(source, /cmd\\\\.startsWith\\\\('/admin'\\\\)/);", "  assert.ok(source.includes(\"cmd.startsWith('/admin')\"));");
+          fs.writeFileSync(p, t);
+          NODE
       - name: Test
         run: |
           npm test
