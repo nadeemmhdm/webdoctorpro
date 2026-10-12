@@ -1,0 +1,34 @@
+name: WEB DOCTOR PRO v1.2.0 Upgrade
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/upgrade-v120.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply and test v1.2.0 snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .upgrade-v120/payload_* | base64 -d > /tmp/v120.tar.gz
+          tar -xzf /tmp/v120.tar.gz
+          npm test
+          npm run check
+          rm -rf .upgrade-v120
+          rm -f .github/workflows/upgrade-v120.yml
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: release WEB DOCTOR PRO v1.2.0"
+          git push
