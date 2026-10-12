@@ -1,0 +1,10 @@
+{
+  "version": "1.3.0",
+  "sourceCommit": "9ac6bdf855162b7924047c64e59ac1075a8f67ec",
+  "bundleChars": 150538,
+  "gzipBytes": 40521,
+  "base64Chars": 54028,
+  "base64Sha256": "91fd06dd5797b9ee9eb410e29307c4476f222bb5e952de153feebdae6bb8a016",
+  "workerSha256": "e31990041ce1359b2937e42189dec0e0aa8b2a6cf07c24cc87505fb1a707c28f",
+  "chunks": 10
+}
