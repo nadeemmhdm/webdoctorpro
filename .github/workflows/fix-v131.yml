@@ -2,92 +2,31 @@ name: WEB DOCTOR PRO v1.3.1 Fixes
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
-      - ".github/workflows/fix-v131.yml"
+      - .github/workflows/fix-v131.yml
+      - .github/scripts/fix-v131.mjs
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  patch-test-commit:
+  fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
     steps:
       - uses: actions/checkout@v4
-      - name: Patch v1.3.1
-        shell: bash
+      - name: Apply guarded patch
+        run: node .github/scripts/fix-v131.mjs
+      - name: Test
         run: |
-          set -euo pipefail
-          node <<'NODE'
-          const fs = require('fs');
-          let s = fs.readFileSync('src/index.js','utf8');
-          const must = (oldv,newv,label) => { if (!s.includes(oldv)) throw new Error(`missing patch anchor: ${label}`); s=s.replace(oldv,newv); };
-          const mustRe = (re,newv,label) => { if (!re.test(s)) throw new Error(`missing regex anchor: ${label}`); s=s.replace(re,newv); };
-
-          must("const VERSION = '1.3.0';", "const VERSION = '1.3.1';", 'version');
-          must("const SUBSCRIPTION_PERIOD = 2592000;", "const SUBSCRIPTION_PERIOD = 2592000;\nconst ADMIN_TELEGRAM_ID = '8984229401';", 'admin id');
-
-          must(`async function isAdmin(env, user) {\n  const id = await appMeta(env, 'admin_user_id');\n  return Boolean(id && String(id) === String(user?.telegram_user_id));\n}\nasync function getAdminTelegramId(env) { return appMeta(env, 'admin_user_id'); }`,
-`async function isAdmin(env, user) {\n  return Boolean(user?.telegram_user_id && String(user.telegram_user_id) === ADMIN_TELEGRAM_ID);\n}\nasync function getAdminTelegramId(env) { return ADMIN_TELEGRAM_ID; }`, 'strict admin identity');
-
-          mustRe(/async function sendPlanInvoice\(env, chatId, user, plan\) \{[\s\S]*?\n\}\nasync function handlePreCheckout/,
-`async function sendPlanInvoice(env, chatId, user, plan) {\n  const cfg = PLAN_CONFIG[plan]; if (!cfg || !cfg.stars) throw new Error('Invalid paid plan.');\n  const payload = \`sub:\${plan}:\${user.id}:\${randomHex(6)}\`;\n  const invoiceUrl = await tg(env, 'createInvoiceLink', {\n    title: \`WEB DOCTOR PRO \${cfg.label}\`,\n    description: \`\${cfg.label} access for 30 days. Recurring payment uses Telegram Stars.\`,\n    payload,\n    currency: 'XTR',\n    prices: [{ label: \`\${cfg.label} — 30 days\`, amount: cfg.stars }],\n    subscription_period: SUBSCRIPTION_PERIOD\n  });\n  return send(env, chatId, \`⭐ <b>Telegram Stars checkout</b>\\n\\n💎 Plan: <b>\${cfg.label}</b>\\n⭐ Price: <b>\${cfg.stars} Stars / 30 days</b>\\n\\nTap below to open Telegram's secure Stars payment screen.\`, {\n    reply_markup: { inline_keyboard: [[{ text: \`⭐ Pay \${cfg.stars} Stars\`, url: invoiceUrl }]] }\n  });\n}\nasync function handlePreCheckout`, 'Stars invoice link');
-
-          must("await env.DB.prepare(`UPDATE domain_verifications SET status='verified',verified_at=? WHERE id=?`).bind(verifiedAt, v.id).run();",
-               "await env.DB.prepare(`UPDATE domain_verifications SET status='verified',verified_at=?,expires_at='9999-12-31T23:59:59.999Z' WHERE id=?`).bind(verifiedAt, v.id).run();", 'persistent verification');
-
-          const helpers = `\nasync function adminSetExactPlan(env, target, plan, days = 30) {\n  if (!target || !PLAN_CONFIG[plan]) throw new Error('Invalid plan target.');\n  if (target.subscription_auto_renew && target.subscription_charge_id) {\n    try {\n      await tg(env, 'editUserStarSubscription', {\n        user_id: Number(target.telegram_user_id),\n        telegram_payment_charge_id: target.subscription_charge_id,\n        is_canceled: true\n      });\n    } catch { /* manual admin override must still succeed */ }\n  }\n  if (plan === 'free') {\n    await env.DB.prepare(\`UPDATE users SET plan='free',plan_expires_at=NULL,subscription_auto_renew=0,subscription_charge_id=NULL,updated_at=? WHERE id=?\`)\n      .bind(nowIso(), target.id).run();\n    return null;\n  }\n  const expiry = addDays(null, Math.max(1, Math.min(3650, Number(days || 30))));\n  await env.DB.prepare(\`UPDATE users SET plan=?,plan_expires_at=?,subscription_auto_renew=0,subscription_charge_id=NULL,updated_at=? WHERE id=?\`)\n    .bind(plan, expiry, nowIso(), target.id).run();\n  return expiry;\n}\n\nasync function createGift(env, targetUserId, coins) {\n  const amount = Math.max(1, Math.min(100000, Number(coins || 0)));\n  const r = await env.DB.prepare(\`INSERT INTO user_gifts(user_id,coins,status,created_by_telegram_id,created_at) VALUES(?,?,'pending',?,?)\`)\n    .bind(targetUserId, amount, ADMIN_TELEGRAM_ID, nowIso()).run();\n  return { id: Number(r.meta?.last_row_id || 0), coins: amount };\n}\n\nasync function sendPendingGiftBox(env, user, chatId, { force = false } = {}) {\n  const gift = await env.DB.prepare(\`SELECT * FROM user_gifts WHERE user_id=? AND status='pending' ORDER BY id ASC LIMIT 1\`).bind(user.id).first();\n  if (!gift) {\n    if (force) await send(env, chatId, '🎁 <b>No unopened gifts</b>\\n\\nYou have no pending gift right now.');\n    return false;\n  }\n  if (!force && gift.notified_at) return false;\n  await send(env, chatId, '🎁 <b>You received a gift!</b>\\n\\nTap the gift box to open it and reveal your coin reward.', {\n    reply_markup: { inline_keyboard: [[{ text: '🎁 Open Gift', callback_data: \`giftopen:\${gift.id}\` }]] }\n  });\n  if (!gift.notified_at) await env.DB.prepare('UPDATE user_gifts SET notified_at=? WHERE id=? AND notified_at IS NULL').bind(nowIso(), gift.id).run();\n  return true;\n}\n\nasync function claimGift(env, q, user, giftId) {\n  const gift = await env.DB.prepare('SELECT * FROM user_gifts WHERE id=? AND user_id=?').bind(giftId, user.id).first();\n  if (!gift) return answerCb(env, q.id, 'Gift not found.');\n  if (gift.status !== 'pending') { await answerCb(env, q.id, 'This gift is already opened.'); return; }\n  const claimedAt = nowIso();\n  const r = await env.DB.prepare(\`UPDATE user_gifts SET status='claimed',claimed_at=? WHERE id=? AND user_id=? AND status='pending'\`)\n    .bind(claimedAt, gift.id, user.id).run();\n  if (!Number(r.meta?.changes || 0)) return answerCb(env, q.id, 'This gift is already opened.');\n  await env.DB.prepare('UPDATE users SET coins=coins+?,updated_at=? WHERE id=?').bind(Number(gift.coins), claimedAt, user.id).run();\n  const bal = await env.DB.prepare('SELECT coins FROM users WHERE id=?').bind(user.id).first();\n  await answerCb(env, q.id, \`🎉 +\${gift.coins} coins\`);\n  return edit(env, q.message.chat.id, q.message.message_id, \`🎁 <b>Gift opened!</b>\\n\\n🪙 You received <b>\${gift.coins} coins</b>.\\n💰 Balance: <b>\${Number(bal?.coins || 0)} coins</b>\`);\n}\n\n`;
-          must("async function dailyUsage(env, user) {", helpers + "async function dailyUsage(env, user) {", 'helpers insert');
-
-          must("  if (!(await isAdmin(env, user))) return false;", "  if (!(await isAdmin(env, user)) || String(msg.chat?.id) !== ADMIN_TELEGRAM_ID || msg.chat?.type !== 'private') return false;", 'admin private gate');
-
-          must(`    [{ text: '⭐ +30d Starter', callback_data: \`admingrantstarter:\${u.id}\` }, { text: '👑 +30d Pro', callback_data: \`admingrantpro:\${u.id}\` }],\n    [{ text: '🪙 +100 Coins', callback_data: \`admincoins100:\${u.id}\` }],`,
-`    [{ text: '🆓 Set Free', callback_data: \`adminsetfree:\${u.id}\` }],\n    [{ text: '⭐ Set Starter', callback_data: \`adminsetstarter:\${u.id}\` }, { text: '👑 Set Pro', callback_data: \`adminsetpro:\${u.id}\` }],\n    [{ text: '🎁 Gift 50', callback_data: \`admingift50:\${u.id}\` }, { text: '🎁 Gift 100', callback_data: \`admingift100:\${u.id}\` }],\n    [{ text: '🎁 Gift 250', callback_data: \`admingift250:\${u.id}\` }, { text: '🪙 +100 Direct', callback_data: \`admincoins100:\${u.id}\` }],`, 'admin user buttons');
-
-          const adminCommands = `  if (cmd === '/admin_plan') {\n    if (!args[0] || !['free','starter','pro'].includes(String(args[1] || '').toLowerCase())) return void await send(env, chatId, 'Usage: <code>/admin_plan TELEGRAM_ID free|starter|pro [DAYS]</code>');\n    const target = await adminByTelegramId(env, args[0]); if (!target) return void await send(env, chatId, '❌ User not found.');\n    const plan = String(args[1]).toLowerCase(), days = /^\\d+$/.test(String(args[2] || '')) ? Number(args[2]) : 30;\n    const expiry = await adminSetExactPlan(env, target, plan, days);\n    await send(env, target.chat_id, \`🛠 <b>Your plan was updated by admin</b>\\n\\n💎 Plan: <b>\${PLAN_CONFIG[plan].label}</b>\${expiry ? \`\\n⏳ Until: \${esc(formatInTimezone(expiry, target.timezone_configured ? target.timezone : 'UTC'))}\` : ''}\`).catch(() => {});\n    return void await send(env, chatId, \`✅ User plan set to <b>\${PLAN_CONFIG[plan].label}</b>.\`);\n  }\n  if (cmd === '/admin_gift') {\n    if (!args[0] || !/^\\d+$/.test(String(args[1] || '')) || Number(args[1]) <= 0) return void await send(env, chatId, 'Usage: <code>/admin_gift TELEGRAM_ID COINS</code>');\n    const target = await adminByTelegramId(env, args[0]); if (!target) return void await send(env, chatId, '❌ User not found.');\n    const gift = await createGift(env, target.id, Number(args[1]));\n    return void await send(env, chatId, \`🎁 Gift #\${gift.id} queued for \${esc(target.first_name || target.username || target.telegram_user_id)}: <b>\${gift.coins} coins</b>. It will appear on their next interaction.\`);\n  }\n`;
-          must("  if (cmd === '/admin_coins') {", adminCommands + "  if (cmd === '/admin_coins') {", 'admin commands');
-
-          must("  if (await handleAdminCommand(env, msg, user, cmd, [...args])) return;",
-`  if ((await isAdmin(env, user)) && String(msg.chat?.id) === ADMIN_TELEGRAM_ID && msg.chat?.type === 'private' && cmd.startsWith('/admin')) {\n    const handled = await handleAdminCommand(env, msg, user, cmd, [...args]);\n    if (handled === false) await send(env, chatId, '❓ <b>Unknown admin command</b>\\n\\nUse /admin to open the admin dashboard.');\n    return;\n  }`, 'admin fallthrough');
-
-          must("  if (cmd === '/invite') return void await send(env, chatId, await referralText(env, user));",
-`  if (cmd === '/gift') return void await sendPendingGiftBox(env, user, chatId, { force: true });\n  if (cmd === '/invite') return void await send(env, chatId, await referralText(env, user));`, 'gift command');
-
-          mustRe(/  if \(data\.startsWith\('buyplan:'\)\) \{[\s\S]*?\n  \}\n  if \(data\.startsWith\('redeem:'\)\)/,
-`  if (data.startsWith('buyplan:')) {\n    const plan = data.slice('buyplan:'.length);\n    if (!['starter','pro'].includes(plan)) return answerCb(env, q.id, 'Invalid plan.');\n    await answerCb(env, q.id, 'Opening Telegram Stars checkout…');\n    try { return await sendPlanInvoice(env, q.message.chat.id, user, plan); }\n    catch { return send(env, q.message.chat.id, '⚠️ <b>Stars checkout could not open</b>\\n\\nPlease try again with <code>/subscribe ' + esc(plan) + '</code>.'); }\n  }\n  if (data.startsWith('redeem:'))`, 'plan callback');
-
-          must("  if (data.startsWith('admin') && await isAdmin(env, user)) {",
-`  if (data.startsWith('giftopen:')) {\n    const giftId = Number(data.slice('giftopen:'.length));\n    if (!Number.isInteger(giftId) || giftId <= 0) return answerCb(env, q.id, 'Invalid gift.');\n    return claimGift(env, q, user, giftId);\n  }\n\n  if (data.startsWith('admin') && await isAdmin(env, user) && String(q.from?.id) === ADMIN_TELEGRAM_ID && String(q.message.chat?.id) === ADMIN_TELEGRAM_ID && q.message.chat?.type === 'private') {`, 'callback gates');
-
-          must("    const id = Number(data.split(':')[1]);",
-`    const id = Number(data.split(':')[1]);\n    if (data.startsWith('adminsetfree:') || data.startsWith('adminsetstarter:') || data.startsWith('adminsetpro:')) {\n      const plan = data.startsWith('adminsetfree:') ? 'free' : data.startsWith('adminsetpro:') ? 'pro' : 'starter';\n      const target = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();\n      if (!target) return send(env, q.message.chat.id, '❌ User not found.');\n      const expiry = await adminSetExactPlan(env, target, plan, 30);\n      await send(env, target.chat_id, \`🛠 <b>Your plan was updated by admin</b>\\n\\n💎 Plan: <b>\${PLAN_CONFIG[plan].label}</b>\${expiry ? \`\\n⏳ Until: \${esc(formatInTimezone(expiry, target.timezone_configured ? target.timezone : 'UTC'))}\` : ''}\`).catch(() => {});\n      const v = await adminUserDetail(env, id); return send(env, q.message.chat.id, v.text, { reply_markup: v.markup });\n    }\n    if (/^admingift(50|100|250):/.test(data)) {\n      const amount = Number(/^admingift(50|100|250):/.exec(data)[1]);\n      const target = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();\n      if (!target) return send(env, q.message.chat.id, '❌ User not found.');\n      const gift = await createGift(env, id, amount);\n      return send(env, q.message.chat.id, \`🎁 Gift #\${gift.id} queued: <b>\${gift.coins} coins</b>. The user will see the gift box on their next interaction.\`);\n    }`, 'admin callback actions');
-
-          must("  await reactToMessage(env, msg, '👀');",
-`  await sendPendingGiftBox(env, user, msg.chat.id).catch(() => false);\n  await reactToMessage(env, msg, '👀');`, 'gift notification');
-
-          must("        { command: 'admin_cancel', description: '✖️ Cancel admin draft mode' }",
-`        { command: 'admin_plan', description: '💎 Set exact user plan' },\n        { command: 'admin_gift', description: '🎁 Queue a coin gift' },\n        { command: 'admin_cancel', description: '✖️ Cancel admin draft mode' }`, 'admin menu commands');
-
-          fs.writeFileSync('src/index.js', s);
-
-          const pkg = JSON.parse(fs.readFileSync('package.json','utf8')); pkg.version='1.3.1'; fs.writeFileSync('package.json', JSON.stringify(pkg,null,2)+'\n');
-
-          fs.writeFileSync('migrations/0005_admin_gifts_and_owner_lock.sql', `PRAGMA foreign_keys = ON;\n\nCREATE TABLE IF NOT EXISTS user_gifts (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  user_id INTEGER NOT NULL,\n  coins INTEGER NOT NULL CHECK(coins > 0),\n  status TEXT NOT NULL DEFAULT 'pending',\n  notified_at TEXT,\n  claimed_at TEXT,\n  created_by_telegram_id TEXT NOT NULL,\n  created_at TEXT NOT NULL,\n  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE\n);\nCREATE INDEX IF NOT EXISTS idx_user_gifts_pending ON user_gifts(user_id,status,id);\n\nINSERT INTO app_meta(key,value,updated_at) VALUES('admin_user_id','8984229401',datetime('now'))\nON CONFLICT(key) DO UPDATE SET value='8984229401', updated_at=datetime('now');\n`);
-
-          let t = fs.readFileSync('test/platform.test.js','utf8');
-          t += `\n\ntest('v1.3.1 fixes Stars checkout, admin lock, gifts and persistent DNS proof', async () => {\n  const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');\n  assert.match(source, /createInvoiceLink/);\n  assert.match(source, /subscription_period: SUBSCRIPTION_PERIOD/);\n  assert.match(source, /ADMIN_TELEGRAM_ID = '8984229401'/);\n  assert.match(source, /cmd\\.startsWith\\('\/admin'\\)/);\n  assert.match(source, /user_gifts/);\n  assert.match(source, /giftopen:/);\n  assert.match(source, /9999-12-31T23:59:59\\.999Z/);\n  assert.match(source, /adminSetExactPlan/);\n});\n`;
-          fs.writeFileSync('test/platform.test.js', t);
-          NODE
-
           npm test
           npm run check
           test "$(node -p "require('./package.json').version")" = "1.3.1"
-          grep -q "createInvoiceLink" src/index.js
-          grep -q "ADMIN_TELEGRAM_ID = '8984229401'" src/index.js
-          grep -q "user_gifts" src/index.js
-          rm -f .github/workflows/fix-v131.yml
+      - name: Commit production source
+        run: |
+          rm -f .github/workflows/fix-v131.yml .github/scripts/fix-v131.mjs
           git config user.name "Nadeem"
           git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
           git add -A
