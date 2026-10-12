@@ -13,5 +13,9 @@ CREATE TABLE IF NOT EXISTS user_gifts (
 );
 CREATE INDEX IF NOT EXISTS idx_user_gifts_pending ON user_gifts(user_id,status,id);
 
+UPDATE domain_verifications
+SET expires_at='9999-12-31T23:59:59.999Z'
+WHERE status='verified';
+
 INSERT INTO app_meta(key,value,updated_at) VALUES('admin_user_id','8984229401',datetime('now'))
 ON CONFLICT(key) DO UPDATE SET value='8984229401', updated_at=datetime('now');
