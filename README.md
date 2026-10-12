@@ -1,62 +1,193 @@
-# WEB DOCTOR PRO
+# WEB DOCTOR PRO 🩺
 
-WEB DOCTOR PRO is a Telegram bot that checks domain registration expiry data and automatically warns users before expiry. It is built for Cloudflare Workers and Cloudflare D1, with Telegram used for all chat/media delivery. No R2 storage is required.
+WEB DOCTOR PRO is a Telegram-first website monitoring and diagnostics bot running on **Cloudflare Workers + D1**. It monitors domain and SSL expiry, performs SEO checks, identifies common hosting/DNS providers, analyzes `robots.txt` and XML sitemaps, checks a safe sample of internal links, and can optionally use **Ollama Cloud** for SEO keyword suggestions.
+
+**Telegram:** `@webdoctorpro_bot`  
+**Version:** `1.1.0`  
+**Developer:** Nadeem  
+**Runtime:** Cloudflare Workers + D1  
+**License:** MIT
 
 ## Features
 
-- Check a domain instantly with `/check example.com`
-- Monitor domains with `/add example.com`
-- Automatic expiry alerts at 30, 14, 7, 3, 1 and 0 days
-- Per-user IANA timezone support for accurate local date/time display
-- Inline timezone choices plus custom `/timezone Area/City`
-- View/remove monitored domains
-- Registry RDAP-based expiry, registrar and status lookup
-- D1-backed users, domains, watches and deduplicated notifications
-- Hourly Cloudflare Cron refresh/notification job
-- Secure Telegram webhook secret validation
-- Health endpoint for deployment verification
-- No R2; Telegram remains the file/media transport if media features are added later
+- 📅 Domain expiry lookup using registry RDAP data
+- 🚨 Automatic domain-expiry alerts at 30, 14, 7, 3, 1 and 0 days
+- 🔐 SSL certificate expiry lookup using public Certificate Transparency data
+- 🚨 Automatic SSL-expiry alerts at 30, 14, 7, 3, 1 and 0 days
+- 🏢 Hosting/CDN fingerprinting from DNS/CNAME and HTTP response signals
+- 🧭 DNS provider detection and registrar information
+- 📈 Deterministic on-page SEO scoring with issue/suggestion reports
+- 🤖 `robots.txt` analysis and XML sitemap detection
+- 🔗 Broken internal-link detection (bounded sample for predictable runtime)
+- ✨ Optional AI keyword suggestions through Ollama Cloud
+- 🕒 Per-user timezone support for accurate expiry times
+- 💬 Easy UX: send a plain domain such as `example.com` without remembering a command
+- 🔘 Inline buttons for Full Scan, SEO, SSL, Provider, Broken Links, Keywords and Monitoring
+- 🗄 D1 persistence; no R2 media/file storage
 
-> Domain registries differ: some RDAP servers do not publish an expiry date. In that case the bot reports the value as unavailable rather than inventing a date.
+## Telegram commands
 
-## Bot commands
+| Command | Purpose |
+| --- | --- |
+| `/check example.com` | Quick domain, SSL, availability and provider summary |
+| `/scan example.com` | Full website health scan |
+| `/seo example.com` | SEO score, issues and recommended fixes |
+| `/ssl example.com` | SSL certificate expiry report |
+| `/provider example.com` | Hosting, DNS and registrar report |
+| `/links example.com` | Broken internal-link check |
+| `/robots example.com` | `robots.txt` + XML sitemap analysis |
+| `/keywords example.com` | SEO keyword suggestions; Ollama Cloud when configured |
+| `/add example.com` | Monitor domain + SSL expiry |
+| `/list` | List monitored domains |
+| `/remove example.com` | Stop monitoring |
+| `/status` | Bot version, developer, GitHub, runtime and service state |
+| `/timezone Asia/Kolkata` | Set local timezone |
+| `/settings` | View user settings |
+| `/help` | Usage guide |
 
-`/start`, `/help`, `/check <domain>`, `/add <domain>`, `/list`, `/remove <domain>`, `/timezone <Area/City>`, `/time`, `/settings`.
+A user can also send `example.com` or `https://example.com/path` directly for a quick check.
 
 ## Architecture
 
-Telegram -> Cloudflare Worker `/telegram` -> D1. Domain metadata is fetched through RDAP. A Cloudflare Cron Trigger invokes the Worker hourly to refresh due domains and send reminders.
+```text
+Telegram
+   │ webhook
+   ▼
+Cloudflare Worker
+   ├── Telegram Bot API
+   ├── RDAP registries
+   ├── Cloudflare DNS-over-HTTPS
+   ├── Website HTTP fetches
+   ├── Cert Spotter CT API
+   ├── Ollama Cloud API (optional, keywords only)
+   └── Cloudflare D1
+        ├── users
+        ├── domains
+        ├── watches
+        ├── notifications
+        └── app_meta
+```
 
-## Cloudflare resources
-
-- Worker: `webdoctorpro`
-- D1 database: `webdoctorpro`
-- D1 binding: `DB`
-- Cron: `0 * * * *`
-- Required secret: `TELEGRAM_BOT_TOKEN`
-- Internal secret: `WEBHOOK_SECRET`
+Cloudflare Cron runs once per hour. Domain RDAP information is refreshed on a bounded schedule, while SSL metadata is refreshed less frequently to avoid unnecessary external requests.
 
 ## Setup
 
-1. Install Node.js 20+ and run `npm install -D wrangler@latest`.
-2. Authenticate with `npx wrangler login`.
-3. Ensure `wrangler.jsonc` points to your D1 database.
-4. Apply the schema: `npx wrangler d1 migrations apply webdoctorpro --remote`.
-5. Add the Telegram token securely: `npx wrangler secret put TELEGRAM_BOT_TOKEN`.
-6. Add a strong webhook secret: `npx wrangler secret put WEBHOOK_SECRET`.
-7. Deploy with `npx wrangler deploy`.
-8. Configure Telegram `setWebhook` to `https://<worker>.workers.dev/telegram` and pass the same `WEBHOOK_SECRET` as `secret_token`.
+### 1. Install
 
-Never commit Telegram tokens or webhook secrets.
+```bash
+npm install
+```
+
+Install Wrangler if it is not already available:
+
+```bash
+npm install -D wrangler@latest
+```
+
+### 2. Create/apply D1 migrations
+
+The repository includes the original schema plus the website-doctor upgrade migration.
+
+```bash
+npx wrangler d1 migrations apply webdoctorpro --remote
+```
+
+### 3. Add required Cloudflare secrets
+
+```bash
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put WEBHOOK_SECRET
+```
+
+Optional Ollama Cloud keyword AI:
+
+```bash
+npx wrangler secret put OLLAMA_API_KEY
+```
+
+Do **not** put secret values in Git, `wrangler.jsonc`, screenshots, issues or logs.
+
+### 4. Deploy
+
+```bash
+npx wrangler deploy
+```
+
+The production configuration uses an hourly Cron trigger:
+
+```text
+0 * * * *
+```
+
+### 5. Telegram webhook
+
+Production webhook path:
+
+```text
+/telegram
+```
+
+The bot validates Telegram webhook requests using `WEBHOOK_SECRET`.
+
+## Ollama Cloud usage
+
+AI is intentionally kept out of normal diagnostics. SEO scoring, robots/sitemap analysis, SSL/domain checks, provider detection and broken-link checks are deterministic. Ollama Cloud is called only for `/keywords` (or the Keywords button) when `OLLAMA_API_KEY` exists.
+
+Default cloud model:
+
+```text
+gpt-oss:20b-cloud
+```
+
+It can be changed with the `OLLAMA_MODEL` Worker variable.
+
+## SEO audit checks
+
+The current audit inspects common technical/on-page signals including:
+
+- title presence and approximate length
+- meta description presence and approximate length
+- H1 count
+- canonical URL
+- HTML `lang`
+- responsive viewport metadata
+- Open Graph title/description
+- `noindex`
+- image `alt` coverage
+- JSON-LD structured data
+- HTTPS usage
+- internal/external link counts
+
+The SEO score is a practical diagnostic score, not a Google ranking score.
+
+## SSL note
+
+SSL expiry is derived from public Certificate Transparency issuance data. This is useful for monitoring and expiry estimates, but it should not be interpreted as a cryptographic verification of the exact certificate currently served by every edge/origin at that instant.
+
+## Broken-link safety
+
+WEB DOCTOR PRO checks a bounded number of internal links per manual run (`15` by default). This keeps Worker execution predictable and avoids aggressive crawling.
 
 ## Development
 
-Run `npm run check` and `npm test`. For scheduled handler testing with Wrangler, use `npx wrangler dev --test-scheduled`.
+```bash
+npm run check
+npm test
+```
 
-## Privacy and storage
+Current test suite covers domain normalization, RDAP parsing, timezone handling, provider detection, SEO analysis, robots/sitemap parsing, SSL certificate parsing and deterministic keyword fallback.
 
-The D1 database stores Telegram user/chat identifiers, optional Telegram display metadata, timezone, watched domains, cached RDAP metadata, and notification deduplication records. The bot does not require object storage.
+## Security
+
+- Telegram token is a Cloudflare secret.
+- Webhook secret is a Cloudflare secret.
+- Ollama API key is optional and stored as a Cloudflare secret.
+- No secret values are committed to GitHub.
+- No R2 bucket is required.
+- External HTML reads are size-bounded.
+- Broken-link crawling is bounded.
+- Telegram callback actions re-validate domains.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [LICENSE](LICENSE).

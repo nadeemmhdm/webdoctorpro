@@ -5,6 +5,7 @@
   "compatibility_date": "2026-10-12",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": { "OLLAMA_MODEL": "gpt-oss:20b-cloud" },
   "d1_databases": [
     {
       "binding": "DB",
