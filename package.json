@@ -1,0 +1,12 @@
+{
+  "name": "webdoctorpro",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram bot for domain expiry monitoring on Cloudflare Workers + D1",
+  "scripts": {
+    "check": "node --check src/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {}
+}
