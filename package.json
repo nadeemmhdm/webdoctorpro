@@ -1,9 +1,9 @@
 {
   "name": "webdoctorpro",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
-  "description": "Telegram website doctor with DNS ownership verification, uptime/domain/certificate monitoring, signed PDF audits, SEO/GEO/AEO analysis and optional Google integrations on Cloudflare Workers + D1",
+  "description": "Telegram website doctor with admin, plans, Stars subscriptions, coupons, referrals, ads, broadcasts, DNS verification, uptime monitoring and signed website audit reports on Cloudflare Workers + D1",
   "scripts": {
     "check": "node --check src/index.js && node --check src/lib.js",
     "test": "node --test test/*.test.js"

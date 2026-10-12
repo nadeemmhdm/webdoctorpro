@@ -1,172 +1,226 @@
 # WEB DOCTOR PRO 🩺
 
-WEB DOCTOR PRO is a Telegram-first website monitoring and diagnostics bot running on **Cloudflare Workers + D1**. It monitors domain and SSL expiry, performs SEO checks, identifies common hosting/DNS providers, analyzes `robots.txt` and XML sitemaps, checks a safe sample of internal links, and can optionally use **Ollama Cloud** for SEO keyword suggestions.
+**Your Website Doctor.** WEB DOCTOR PRO is a Telegram-first website monitoring, ownership-verification, audit and reporting platform running on **Cloudflare Workers + D1**.
 
 **Telegram:** `@webdoctorpro_bot`  
-**Version:** `1.1.0`  
+**Version:** `1.3.0`  
 **Developer:** Nadeem  
 **Runtime:** Cloudflare Workers + D1  
 **License:** MIT
 
-## Features
+## Core capabilities
 
-- 📅 Domain expiry lookup using registry RDAP data
-- 🚨 Automatic domain-expiry alerts at 30, 14, 7, 3, 1 and 0 days
-- 🔐 SSL certificate expiry lookup using public Certificate Transparency data
-- 🚨 Automatic SSL-expiry alerts at 30, 14, 7, 3, 1 and 0 days
-- 🏢 Hosting/CDN fingerprinting from DNS/CNAME and HTTP response signals
-- 🧭 DNS provider detection and registrar information
-- 📈 Deterministic on-page SEO scoring with issue/suggestion reports
-- 🤖 `robots.txt` analysis and XML sitemap detection
-- 🔗 Broken internal-link detection (bounded sample for predictable runtime)
-- ✨ Optional AI keyword suggestions through Ollama Cloud
-- 🕒 Per-user timezone support for accurate expiry times
-- 💬 Easy UX: send a plain domain such as `example.com` without remembering a command
-- 🔘 Inline buttons for Full Scan, SEO, SSL, Provider, Broken Links, Keywords and Monitoring
-- 🗄 D1 persistence; no R2 media/file storage
+- 🌐 Quick website health checks
+- 🛡 DNS TXT ownership verification before monitoring
+- ⏱ One-minute uptime monitoring for verified websites
+- 🚨 Automatic downtime and recovery alerts
+- 📅 Domain-expiry monitoring and reminders
+- 🔐 Certificate-expiry monitoring and reminders
+- 📈 SEO, GEO and AEO audits with improvement suggestions
+- ⚡ PageSpeed Insights checks without requiring the platform owner's API key
+- 🔗 Broken-link detection
+- 📄 `robots.txt`, sitemap and `llms.txt` analysis
+- 🏢 Hosting/CDN, DNS-provider and registrar detection
+- 📑 Signed branded PDF full-scan reports
+- 🗓 Scheduled daily/weekly/monthly reports according to plan
+- 💬 Telegram message reactions and progress animations
+- 🪙 Referral coins and plan-extension rewards
+- 🎟 Coupon redemption
+- ⭐ Telegram Stars recurring subscriptions
+- 📣 Admin-managed ads and broadcasts using Telegram-hosted media references only
+- 🗄 D1 persistence; no R2 media storage
 
-## Telegram commands
+## Plans
+
+| Plan | Price | Daily checks | Daily PDFs | Monitored sites | Schedules | Ads |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| Free | 0 | 5 | 1 | 1 | Weekly | After eligible scans |
+| Starter | 49 Stars / 30 days | 25 | 5 | 5 | Daily + weekly | Every 5 eligible scans |
+| Pro | 129 Stars / 30 days | 100 | 20 | 25 | Daily + weekly + monthly | None |
+
+Subscriptions use Telegram Stars (`XTR`) recurring invoices with a 30-day subscription period.
+
+## User commands
 
 | Command | Purpose |
 | --- | --- |
-| `/check example.com` | Quick domain, SSL, availability and provider summary |
-| `/scan example.com` | Full website health scan |
-| `/seo example.com` | SEO score, issues and recommended fixes |
-| `/ssl example.com` | SSL certificate expiry report |
-| `/provider example.com` | Hosting, DNS and registrar report |
-| `/links example.com` | Broken internal-link check |
-| `/robots example.com` | `robots.txt` + XML sitemap analysis |
-| `/keywords example.com` | SEO keyword suggestions; Ollama Cloud when configured |
-| `/add example.com` | Monitor domain + SSL expiry |
-| `/list` | List monitored domains |
+| `/check example.com` | Quick website health check |
+| `/scan example.com` | Full audit + signed PDF |
+| `/seo example.com` | SEO/GEO/AEO report |
+| `/performance example.com` | PageSpeed report |
+| `/ssl example.com` | Certificate-expiry report |
+| `/provider example.com` | Hosting/DNS/registrar report |
+| `/links example.com` | Broken-link scan |
+| `/robots example.com` | Robots/sitemap/llms.txt analysis |
+| `/keywords example.com` | Keyword opportunities |
+| `/add example.com` | Verify ownership and monitor |
+| `/verify example.com` | Re-check DNS TXT verification |
+| `/schedule example.com weekly` | Configure signed scheduled reports |
+| `/google_setup CLIENT_ID CLIENT_SECRET` | Configure the user's own Google OAuth app |
+| `/google` | Authorize the user's own Google account |
+| `/analytics example.com PROPERTY_ID` | Map optional Analytics property |
+| `/plans` | View plans / pay with Telegram Stars |
+| `/invite` | Referral link and rewards |
+| `/coins` | Coin balance and redemption |
+| `/coupon CODE` | Redeem coupon |
+| `/list` | Monitored websites |
 | `/remove example.com` | Stop monitoring |
-| `/status` | Bot version, developer, GitHub, runtime and service state |
-| `/timezone Asia/Kolkata` | Set local timezone |
-| `/settings` | View user settings |
-| `/help` | Usage guide |
+| `/status` | Bot/version/service status |
+| `/settings` | Plan, limits, monitoring and connections |
 
-A user can also send `example.com` or `https://example.com/path` directly for a quick check.
+Users can also send a domain directly, such as `example.com`.
 
-## Architecture
+## Ownership verification
+
+Monitoring is protected by a unique DNS TXT challenge. The bot generates a record such as:
 
 ```text
-Telegram
-   │ webhook
-   ▼
-Cloudflare Worker
-   ├── Telegram Bot API
-   ├── RDAP registries
-   ├── Cloudflare DNS-over-HTTPS
-   ├── Website HTTP fetches
-   ├── Cert Spotter CT API
-   ├── Ollama Cloud API (optional, keywords only)
-   └── Cloudflare D1
-        ├── users
-        ├── domains
-        ├── watches
-        ├── notifications
-        └── app_meta
+Type: TXT
+Name: _webdoctorpro.example.com
+Value: webdoctorpro-verification=<unique-token>
 ```
 
-Cloudflare Cron runs once per hour. Domain RDAP information is refreshed on a bounded schedule, while SSL metadata is refreshed less frequently to avoid unnecessary external requests.
+Only verified websites can use uptime monitoring, scheduled reports and ownership-sensitive connected data.
 
-## Setup
+## PDF reports
 
-### 1. Install
+A Full Scan generates a reusable WEB DOCTOR PRO branded PDF template containing:
+
+- health and HTTP status
+- domain and certificate expiry
+- provider information
+- SEO / GEO / AEO scores
+- robots / sitemap / llms.txt state
+- broken links
+- PageSpeed metrics when available
+- connected read-only Google metrics when authorized by that user
+- prioritized improvements and keyword opportunities
+- report ID, generation timestamp and WEB DOCTOR PRO signature metadata
+
+The PDF is generated in memory and sent directly to Telegram. R2 is not used.
+
+## Google integration: user-owned credentials only
+
+WEB DOCTOR PRO does **not** use the platform owner's Google client ID, client secret or PageSpeed API key.
+
+Each user who wants Search Console / optional Analytics integration configures their **own Google Cloud OAuth Web client** and authorizes their own account. Their OAuth client credentials and resulting tokens are encrypted before D1 persistence using the `GOOGLE_TOKEN_KEY` encryption secret.
+
+Redirect URI:
+
+```text
+https://webdoctorpro.nadeemmhdm-ai.workers.dev/google/callback
+```
+
+PageSpeed Insights runs without a platform API key. Google data is optional; core monitoring works without it.
+
+## Admin platform
+
+Admin commands are scoped to the configured private admin chat. Normal users do not see admin commands in their Telegram command menu.
+
+Admin capabilities include:
+
+- user list and account details
+- block / unblock users
+- manual Starter / Pro duration grants
+- coin adjustments
+- coupon create / edit / delete
+- automatic coupon expiry and max-use cleanup
+- ad create / edit / enable / disable / delete
+- global ads on/off
+- ad text/image/video/voice support
+- dynamic URL buttons
+- broadcast text/image/video/voice support
+- batched broadcast delivery
+- plan and Stars revenue statistics
+
+### Useful admin commands
+
+```text
+/admin
+/admin_users
+/admin_user TELEGRAM_ID
+/admin_block TELEGRAM_ID
+/admin_unblock TELEGRAM_ID
+/admin_grant TELEGRAM_ID pro 30
+/admin_coins TELEGRAM_ID 100
+
+/admin_coupons
+/admin_coupon_create CODE pro 7 100 2026-12-31 0
+/admin_coupon_edit CODE days=14 max=200 active=1
+/admin_coupon_delete CODE
+
+/admin_ads
+/admin_ad_create
+/admin_ad_edit ID
+/admin_ad_buttons ID Visit|https://example.com; Docs|https://example.com/docs
+/admin_ad_on ID
+/admin_ad_off ID
+/admin_ad_delete ID
+/admin_ads_on
+/admin_ads_off
+
+/admin_broadcasts
+/admin_broadcast
+/admin_broadcast_buttons ID Open|https://example.com
+/admin_broadcast_send ID
+/admin_broadcast_delete ID
+```
+
+Ad/broadcast media bytes are **not copied into D1 or R2**. The database stores Telegram `file_id` references and metadata. Ads are queued for automatic deletion after their display window.
+
+## Referral coins
+
+The bot creates a personal referral link. Current rewards:
+
+- referrer: 25 coins
+- new user: 10 coins
+- 100 coins → +7 Starter days
+- 250 coins → +7 Pro days
+- 600 coins → +30 Pro days
+
+## Cloudflare setup
+
+Required secrets:
 
 ```bash
-npm install
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put WEBHOOK_SECRET
+npx wrangler secret put GOOGLE_TOKEN_KEY
 ```
 
-Install Wrangler if it is not already available:
+An optional private suggestion service can be configured in Cloudflare without exposing its implementation details in bot messages.
 
-```bash
-npm install -D wrangler@latest
-```
-
-### 2. Create/apply D1 migrations
-
-The repository includes the original schema plus the website-doctor upgrade migration.
+Apply migrations:
 
 ```bash
 npx wrangler d1 migrations apply webdoctorpro --remote
 ```
 
-### 3. Add required Cloudflare secrets
-
-```bash
-npx wrangler secret put TELEGRAM_BOT_TOKEN
-npx wrangler secret put WEBHOOK_SECRET
-```
-
-Optional Ollama Cloud keyword AI:
-
-```bash
-npx wrangler secret put OLLAMA_API_KEY
-```
-
-Do **not** put secret values in Git, `wrangler.jsonc`, screenshots, issues or logs.
-
-### 4. Deploy
+Deploy:
 
 ```bash
 npx wrangler deploy
 ```
 
-The production configuration uses an hourly Cron trigger:
+Production Cron:
 
 ```text
-0 * * * *
+* * * * *
 ```
 
-### 5. Telegram webhook
+This drives uptime checks, report scheduling, broadcast batches, coupon cleanup and temporary ad-message cleanup.
 
-Production webhook path:
+## Security notes
 
-```text
-/telegram
-```
-
-The bot validates Telegram webhook requests using `WEBHOOK_SECRET`.
-
-## Ollama Cloud usage
-
-AI is intentionally kept out of normal diagnostics. SEO scoring, robots/sitemap analysis, SSL/domain checks, provider detection and broken-link checks are deterministic. Ollama Cloud is called only for `/keywords` (or the Keywords button) when `OLLAMA_API_KEY` exists.
-
-Default cloud model:
-
-```text
-gpt-oss:20b-cloud
-```
-
-It can be changed with the `OLLAMA_MODEL` Worker variable.
-
-## SEO audit checks
-
-The current audit inspects common technical/on-page signals including:
-
-- title presence and approximate length
-- meta description presence and approximate length
-- H1 count
-- canonical URL
-- HTML `lang`
-- responsive viewport metadata
-- Open Graph title/description
-- `noindex`
-- image `alt` coverage
-- JSON-LD structured data
-- HTTPS usage
-- internal/external link counts
-
-The SEO score is a practical diagnostic score, not a Google ranking score.
-
-## SSL note
-
-SSL expiry is derived from public Certificate Transparency issuance data. This is useful for monitoring and expiry estimates, but it should not be interpreted as a cryptographic verification of the exact certificate currently served by every edge/origin at that instant.
-
-## Broken-link safety
-
-WEB DOCTOR PRO checks a bounded number of internal links per manual run (`15` by default). This keeps Worker execution predictable and avoids aggressive crawling.
+- Telegram bot token and webhook secret remain Cloudflare secrets.
+- Admin commands are scoped to one Telegram private chat.
+- Monitoring requires DNS TXT ownership verification.
+- User Google OAuth credentials/tokens are encrypted before D1 persistence.
+- Media bytes for ads/broadcasts remain on Telegram infrastructure.
+- No R2 bucket is required.
+- External reads, HTML size and broken-link crawling are bounded.
+- Paid entitlements are granted only after Telegram `successful_payment` updates.
+- Blocked users are rejected server-side.
 
 ## Development
 
@@ -174,19 +228,6 @@ WEB DOCTOR PRO checks a bounded number of internal links per manual run (`15` by
 npm run check
 npm test
 ```
-
-Current test suite covers domain normalization, RDAP parsing, timezone handling, provider detection, SEO analysis, robots/sitemap parsing, SSL certificate parsing and deterministic keyword fallback.
-
-## Security
-
-- Telegram token is a Cloudflare secret.
-- Webhook secret is a Cloudflare secret.
-- Ollama API key is optional and stored as a Cloudflare secret.
-- No secret values are committed to GitHub.
-- No R2 bucket is required.
-- External HTML reads are size-bounded.
-- Broken-link crawling is bounded.
-- Telegram callback actions re-validate domains.
 
 ## License
 
