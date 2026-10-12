@@ -1,0 +1,70 @@
+name: Prepare WEB DOCTOR PRO v1.3 Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/prepare-v130-deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build verified single-file Worker bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          npm run check
+          node <<'NODE'
+          const fs = require('fs');
+          const zlib = require('zlib');
+          const crypto = require('crypto');
+          let lib = fs.readFileSync('src/lib.js','utf8');
+          let index = fs.readFileSync('src/index.js','utf8');
+          lib = lib.replace(/^export\s+/gm, '');
+          index = index.replace(/^import\s*\{[\s\S]*?\}\s*from\s*['"]\.\/lib\.js['"];\s*/m, '');
+          index = index.replace(/^export\s*\{[^}]+\};\s*/m, '');
+          const worker = `${lib}\n\n${index}`;
+          fs.writeFileSync('/tmp/worker.js', worker);
+          const gz = zlib.gzipSync(Buffer.from(worker));
+          const b64 = gz.toString('base64');
+          fs.rmSync('.deploy', {recursive:true, force:true});
+          fs.mkdirSync('.deploy');
+          const chunkSize = 6000;
+          for (let i=0, n=0; i<b64.length; i+=chunkSize, n++) {
+            fs.writeFileSync(`.deploy/v130_${String(n).padStart(2,'0')}.txt`, b64.slice(i,i+chunkSize));
+          }
+          fs.writeFileSync('.deploy/manifest.json', JSON.stringify({
+            version:'1.3.0',
+            sourceCommit:process.env.GITHUB_SHA,
+            bundleChars:worker.length,
+            gzipBytes:gz.length,
+            base64Chars:b64.length,
+            base64Sha256:crypto.createHash('sha256').update(b64).digest('hex'),
+            workerSha256:crypto.createHash('sha256').update(worker).digest('hex'),
+            chunks:Math.ceil(b64.length/chunkSize)
+          }, null, 2));
+          NODE
+          node --check /tmp/worker.js
+          grep -q "const VERSION = '1.3.0'" /tmp/worker.js
+          grep -q "PLAN_CONFIG" /tmp/worker.js
+          grep -q "admin_user_id" /tmp/worker.js
+          grep -q "star_payments" /tmp/worker.js
+          grep -q "pending_message_deletes" /tmp/worker.js
+          grep -q "google_user_configs" /tmp/worker.js
+          ! grep -q "GOOGLE_CLIENT_ID" /tmp/worker.js
+          ! grep -q "GOOGLE_CLIENT_SECRET" /tmp/worker.js
+          ! grep -q "PAGESPEED_API_KEY" /tmp/worker.js
+          rm -f .github/workflows/prepare-v130-deploy.yml
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: prepare verified v1.3.0 worker deploy bundle"
+          git push
