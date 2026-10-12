@@ -1,0 +1,35 @@
+name: Resplit WEB DOCTOR PRO v1.3 Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/resplit-v130-deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  resplit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resplit verified payload without modifying bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          B64="$(cat .deploy/v130_*.txt | tr -d '\n\r ')"
+          test "${#B64}" = "$(node -p "require('./.deploy/manifest.json').base64Chars")"
+          printf '%s' "$B64" | sha256sum | grep -q "$(node -p "require('./.deploy/manifest.json').base64Sha256")"
+          rm -rf .deploy_transport
+          mkdir .deploy_transport
+          printf '%s' "$B64" | fold -w 2500 | split -d -a 2 -l 1 - .deploy_transport/p_
+          cp .deploy/manifest.json .deploy_transport/manifest.json
+          rm -f .github/workflows/resplit-v130-deploy.yml
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: prepare transport-safe v1.3 deploy chunks"
+          git push
