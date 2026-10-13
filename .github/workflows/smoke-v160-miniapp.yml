@@ -1,0 +1,39 @@
+name: Smoke WEB DOCTOR PRO v1.6 Mini App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/smoke-v160-miniapp.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify health and Mini App
+        run: |
+          set -euo pipefail
+          BASE="https://webdoctorpro.nadeemmhdm-ai.workers.dev"
+          for i in 1 2 3; do
+            curl --fail --silent --show-error "$BASE/health" -o /tmp/health.json && break || sleep 2
+          done
+          grep -q '"version":"1.6.0"' /tmp/health.json
+          curl --fail --silent --show-error "$BASE/app" -o /tmp/app.html
+          grep -q 'WEB DOCTOR PRO' /tmp/app.html
+          grep -q 'Admin dashboard' /tmp/app.html
+          STATUS=$(curl --silent --output /tmp/unauth.json --write-out '%{http_code}' "$BASE/api/mini/bootstrap")
+          test "$STATUS" = "401"
+          grep -q 'authentication failed' /tmp/unauth.json
+      - name: Remove smoke workflow
+        run: |
+          rm -f .github/workflows/smoke-v160-miniapp.yml
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: remove v1.6 production smoke workflow"
+          git push
