@@ -1,0 +1,32 @@
+name: Fix dynamic edge DNS alerts
+on:
+  push:
+    paths:
+      - 'scripts/fix_dynamic_edge_dns_alerts.py'
+      - '.github/workflows/fix-dynamic-edge-dns-alerts.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply patch
+        run: python3 scripts/fix_dynamic_edge_dns_alerts.py
+      - name: Test
+        run: |
+          node --check src/index.js
+          node --check src/lib.js
+          node --check src/miniapp.js
+          npm test
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add src/index.js package.json test/platform.test.js
+          git commit -m "fix: ignore benign CDN edge IP rotations"
+          git push
