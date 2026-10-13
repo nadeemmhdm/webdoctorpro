@@ -6,7 +6,7 @@ replace("const VERSION = '1.4.0';", "const VERSION = '1.4.1';", 'version');
 replace("const LAST_UPDATED_AT = '2026-10-13T07:02:00+05:30';", "const LAST_UPDATED_AT = '2026-10-13T07:18:00+05:30';", 'updated');
 
 const anchor = 'async function websiteSnapshot(domain) {';
-const helper = String.raw`async function isHttp530Domain(domain) {
+const helper = `async function isHttp530Domain(domain) {
   try {
     const r = await fetch(\`https://\${domain}\`, {
       method: 'GET', redirect: 'follow',
