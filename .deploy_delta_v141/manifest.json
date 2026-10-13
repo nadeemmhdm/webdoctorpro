@@ -1,0 +1,11 @@
+{
+  "old_len": 158382,
+  "new_len": 180444,
+  "old_sha256": "2360a000942659a4151dca0d39536978184de6f887bd380777457f829d7439ba",
+  "new_sha256": "96f9e840cd4eaa31c9a17997a5e99ffdb2aba2eb6717c180c89cd771abb1b187",
+  "old_lines": 2023,
+  "ops": 39,
+  "patch_json_bytes": 28719,
+  "patch_gzip_bytes": 8346,
+  "patch_b64_chars": 11128
+}
