@@ -1,0 +1,132 @@
+name: HTTP 530 Fast Fail
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/http530-fastfail.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply HTTP 530 fast-fail behavior
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/index.js')
+          s=p.read_text()
+          s=s.replace("const VERSION = '1.4.0';", "const VERSION = '1.4.1';")
+          s=s.replace("const LAST_UPDATED_AT = '2026-10-13T07:02:00+05:30';", "const LAST_UPDATED_AT = '2026-10-13T07:18:00+05:30';")
+
+          anchor="async function websiteSnapshot(domain) {"
+          helper="""async function isHttp530Domain(domain) {
+  try {
+    const r = await fetch(`https://${domain}`, {
+      method: 'GET', redirect: 'follow',
+      headers: { Range: 'bytes=0-0', 'user-agent': `WEB-DOCTOR-PRO/${VERSION}` },
+      signal: AbortSignal.timeout(10000)
+    });
+    try { await r.body?.cancel(); } catch { /* ignore */ }
+    return r.status === 530;
+  } catch { return false; }
+}
+function invalidDomain530Text(domain) {
+  return `❌ <b>Invalid domain</b>\n\n🌐 ${esc(domain)}`;
+}
+
+"""
+          if helper.strip() not in s:
+            if anchor not in s: raise SystemExit('websiteSnapshot anchor missing')
+            s=s.replace(anchor, helper+anchor, 1)
+
+          old="""async function runTool(env, chatId, user, action, domain) {
+  if (!(await requireTimezone(env, chatId, user))) return;
+  const usage = await consumeUsage(env, user, { report: action === 'scan' });"""
+          new="""async function runTool(env, chatId, user, action, domain) {
+  if (!(await requireTimezone(env, chatId, user))) return;
+  if (await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));
+  const usage = await consumeUsage(env, user, { report: action === 'scan' });"""
+          if old not in s: raise SystemExit('runTool anchor missing')
+          s=s.replace(old,new,1)
+
+          old="""  if (action === 'scan') {
+    const result = await runFullScan(env, chatId, user, domain);
+    await maybeServeAd(env, user, chatId).catch(() => null);
+    return result;
+  }"""
+          new="""  if (action === 'scan') {
+    const result = await runFullScan(env, chatId, user, domain, { preflightDone: true });
+    if (!result) return null;
+    await maybeServeAd(env, user, chatId).catch(() => null);
+    return result;
+  }"""
+          if old not in s: raise SystemExit('scan branch anchor missing')
+          s=s.replace(old,new,1)
+
+          old="async function runFullScan(env, chatId, user, domain, { silentProgress = false, scheduled = false } = {}) {\n  let msg = null;"
+          new="async function runFullScan(env, chatId, user, domain, { silentProgress = false, scheduled = false, preflightDone = false } = {}) {\n  if (!preflightDone && await isHttp530Domain(domain)) { await send(env, chatId, invalidDomain530Text(domain)); return null; }\n  let msg = null;"
+          if old not in s: raise SystemExit('runFullScan anchor missing')
+          s=s.replace(old,new,1)
+
+          # If a 530 somehow reaches a tool after preflight (redirect/race), normalize the error UI too.
+          old="""  } catch (e) {
+    await edit(env, chatId, msg.message_id, `⚠️ <b>Check could not finish</b>\\n\\n🌐 ${esc(domain)}\\n${esc(short(e.message, 500))}`);
+    return null;
+  }
+}"""
+          new="""  } catch (e) {
+    if (e?.status === 530 || /HTTP 530/i.test(String(e?.message || ''))) {
+      await edit(env, chatId, msg.message_id, invalidDomain530Text(domain));
+      return null;
+    }
+    await edit(env, chatId, msg.message_id, `⚠️ <b>Check could not finish</b>\\n\\n🌐 ${esc(domain)}\\n${esc(short(e.message, 500))}`);
+    return null;
+  }
+}"""
+          if old not in s: raise SystemExit('runTool catch anchor missing')
+          s=s.replace(old,new,1)
+
+          p.write_text(s)
+
+          pkg=Path('package.json')
+          import json
+          j=json.loads(pkg.read_text()); j['version']='1.4.1'; pkg.write_text(json.dumps(j,indent=2)+'\n')
+
+          tp=Path('test/platform.test.js')
+          t=tp.read_text()
+          t += """
+
+test('HTTP 530 fast-fails as invalid domain before paid checks', async () => {
+  const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
+  assert.ok(source.includes("const VERSION = '1.4.1'"));
+  assert.ok(source.includes('async function isHttp530Domain(domain)'));
+  assert.ok(source.includes('return r.status === 530'));
+  assert.ok(source.includes('if (await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));'));
+  assert.ok(source.includes('if (!preflightDone && await isHttp530Domain(domain))'));
+  assert.ok(source.includes('❌ <b>Invalid domain</b>'));
+});
+"""
+          tp.write_text(t)
+          PY
+      - name: Verify
+        run: |
+          set -euo pipefail
+          npm test
+          npm run check
+          node --check src/index.js
+          grep -q "const VERSION = '1.4.1'" src/index.js
+          grep -q "return r.status === 530" src/index.js
+          grep -q "Invalid domain" src/index.js
+      - name: Commit
+        run: |
+          rm -f .github/workflows/http530-fastfail.yml
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: stop domain checks immediately on HTTP 530"
+          git push
