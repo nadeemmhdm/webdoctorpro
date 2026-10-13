@@ -1,0 +1,36 @@
+name: WEB DOCTOR PRO v1.5.1 Fixes
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-v151.yml
+      - .github/scripts/fix-v151.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply guarded patch
+        run: python .github/scripts/fix-v151.py
+      - name: Test and syntax check
+        run: |
+          npm test
+          npm run check
+          test "$(node -p "require('./package.json').version")" = "1.5.1"
+          grep -q "command: 'verified'" src/index.js
+          grep -q "command: 'pending'" src/index.js
+          grep -q "Global Email Notification Sender" src/index.js
+      - name: Commit production source
+        run: |
+          rm -f .github/workflows/fix-v151.yml .github/scripts/fix-v151.py
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: WEB DOCTOR PRO v1.5.1 verified pending and email UX"
+          git push
