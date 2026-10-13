@@ -1,0 +1,45 @@
+name: Prepare Compact v1.6 Live Patch
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/prepare-v160-live-patch.yml]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract exact Mini App payloads
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import gzip,base64,hashlib,json,shutil
+          idx=Path('src/index.js').read_text()
+          start=idx.index('const MINI_USER_COMMANDS =')
+          end=idx.index('\nexport { activePlan',start)
+          backend=idx[start:end]
+          mini=Path('src/miniapp.js').read_text()
+          if not mini.startswith('export const MINI_APP_HTML'):
+              raise SystemExit('unexpected miniapp export')
+          mini=mini.replace('export const MINI_APP_HTML','const MINI_APP_HTML',1)
+          out=Path('.deploy_v160_patch')
+          if out.exists(): shutil.rmtree(out)
+          out.mkdir()
+          manifest={'version':'1.6.0','payloads':{}}
+          for name,text in [('backend',backend),('miniapp',mini)]:
+              raw=text.encode(); gz=gzip.compress(raw,9); b64=base64.b64encode(gz).decode(); size=3500
+              parts=[b64[i:i+size] for i in range(0,len(b64),size)]
+              for i,x in enumerate(parts):(out/f'{name}-{i:02d}.txt').write_text(x)
+              manifest['payloads'][name]={'raw_chars':len(text),'raw_sha256':hashlib.sha256(raw).hexdigest(),'gzip_bytes':len(gz),'b64_chars':len(b64),'chunks':len(parts)}
+          (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+          print(json.dumps(manifest,indent=2))
+          PY
+      - name: Commit compact payload
+        run: |
+          rm -f .github/workflows/prepare-v160-live-patch.yml
+          git config user.name Nadeem
+          git config user.email 160517299+nadeemmhdm@users.noreply.github.com
+          git add -A
+          git commit -m "chore: stage compact v1.6 live patch payload"
+          git push
