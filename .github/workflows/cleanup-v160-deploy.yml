@@ -1,0 +1,32 @@
+name: Cleanup WEB DOCTOR PRO v1.6 Deployment Artifacts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/cleanup-v160-deploy.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Re-verify production source before cleanup
+        run: |
+          npm test
+          npm run check
+          node --check src/miniapp.js
+          test "$(node -p "require('./package.json').version")" = "1.6.0"
+      - name: Remove temporary deployment artifacts
+        run: |
+          rm -rf .deploy_v160 .deploy_v160_patch .bundle-recipe.json
+          rm -f .github/workflows/cleanup-v160-deploy.yml
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: cleanup v1.6 deployment artifacts"
+          git push
