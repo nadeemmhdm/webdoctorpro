@@ -4,7 +4,7 @@ import {
   parseCertSpotter, fallbackKeywords, normalizeTxtRecord, parsePageSpeed, scheduleIntervalMs, buildReportPdf
 } from './lib.js';
 
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
@@ -143,6 +143,21 @@ async function sendStoredMedia(env, chatId, contentType, fileId, textContent = '
   if (contentType === 'voice') return tg(env, 'sendVoice', { chat_id: chatId, voice: fileId, caption: textContent || undefined, parse_mode: 'HTML', reply_markup });
   return send(env, chatId, textContent || '📣', { reply_markup });
 }
+async function filteredSitesView(env, userId, filter = 'all', team = false) {
+  const where = filter === 'verified' ? ' AND w.verified_at IS NOT NULL' : filter === 'pending' ? ' AND w.verified_at IS NULL' : '';
+  const rows = await env.DB.prepare(`SELECT d.name,d.expires_at,d.ssl_expires_at,w.verified_at,w.uptime_state,w.report_schedule,w.next_report_at FROM watches w JOIN domains d ON d.id=w.domain_id WHERE w.user_id=? AND w.active=1${where} ORDER BY d.name`).bind(userId).all();
+  const title = filter === 'verified' ? '✅ Verified Websites' : filter === 'pending' ? '⏳ Pending Websites' : (team ? '📋 Team Monitored Websites' : '📋 Monitored Websites');
+  if (!rows.results.length) return { text: `${title}\n\n${filter === 'verified' ? 'No verified websites yet.' : filter === 'pending' ? 'No pending websites.' : 'No monitored websites yet.'}`, markup: sitesFilterMarkup(filter) };
+  const lines = rows.results.map((r,i) => `${i+1}. 🌐 <b>${esc(r.name)}</b>\n   ${r.verified_at ? '✅ Verified' : '⏳ Pending verification'} • ${esc(r.uptime_state || 'unknown')} • reports ${esc(r.report_schedule || 'off')}`);
+  return { text: `<b>${title}</b>\n\n${lines.join('\n\n')}`, markup: sitesFilterMarkup(filter) };
+}
+function sitesFilterMarkup(active = 'all') {
+  const mark = (key,label) => ({ text: `${active===key?'• ':''}${label}`, callback_data: `sites:${key}` });
+  return { inline_keyboard: [
+    [mark('all','🌐 All'), mark('verified','✅ Verified'), mark('pending','⏳ Pending')]
+  ] };
+}
+
 async function appMeta(env, key) {
   const row = await env.DB.prepare('SELECT value FROM app_meta WHERE key=?').bind(key).first();
   return row?.value ?? null;
@@ -362,6 +377,11 @@ async function handleTeamChatUpdate(env, msg) {
     if (!args[0] || !args[1]) return send(env, chatId, '💡 Usage: <code>/schedule example.com weekly</code>');
     let domain; try { domain = normalizeDomain(args[0]); } catch { return send(env, chatId, '❌ Invalid domain.'); }
     return setSchedule(env, chatId, access.owner, domain, args[1].toLowerCase());
+  }
+  if (['/verified','/pending','/pwnding'].includes(cmd)) {
+    const filter = cmd === '/verified' ? 'verified' : 'pending';
+    const v = await filteredSitesView(env, access.owner.id, filter, true);
+    return send(env, chatId, v.text, { reply_markup: v.markup });
   }
   if (cmd === '/list') {
     const rows = await env.DB.prepare(`SELECT d.name,w.verified_at,w.uptime_state,w.report_schedule FROM watches w JOIN domains d ON d.id=w.domain_id WHERE w.user_id=? AND w.active=1 ORDER BY d.name`).bind(access.owner.id).all();
@@ -630,7 +650,9 @@ async function sendUserEmail(env,user,subject,text,opts={}){
 }
 async function smtpStatusText(env){
   const row=await env.DB.prepare('SELECT sender_email,active,updated_at FROM smtp_config WHERE id=1').first();
-  return `📧 <b>Email Notification Sender</b>\n\n${row?`${row.active?'🟢 Enabled':'⚪ Disabled'}\nSender: <code>${esc(row.sender_email)}</code>\nUpdated: ${esc(row.updated_at)}`:'⚪ Not configured'}\n\n<b>Recommended setup</b>\nUse a separate Gmail account for WEB DOCTOR PRO. Enable 2-Step Verification, create a 16-character App Password, then send:\n<code>/admin_email_setup sender@gmail.com APP_PASSWORD</code>\n\nThe setup message is deleted after the password is encrypted. Never use your normal Google Account password.`;
+  return `📧 <b>Global Email Notification Sender</b>\n\n${row?`${row.active?'🟢 Enabled':'⚪ Disabled'}\nSender: <code>${esc(row.sender_email)}</code>\nUpdated: ${esc(row.updated_at)}`:'⚪ Not configured'}\n\n<b>Recommended setup</b>\nThis single admin Gmail SMTP account sends automated alerts for all users. Users only save their recipient email with /email.
+
+Use a separate Gmail account for WEB DOCTOR PRO. Enable 2-Step Verification, create a 16-character App Password, then send:\n<code>/admin_email_setup sender@gmail.com APP_PASSWORD</code>\n\nThe setup message is deleted after the password is encrypted. Never use your normal Google Account password.`;
 }
 async function registrationIsOpen(env){ return (await appMeta(env,'registrations_open'))!=='0'; }
 async function waitlistRegistration(env,from,chatId){
@@ -1035,6 +1057,8 @@ async function syncBotProfile(env) {
       { command: 'coins', description: '🪙 Coins & plan rewards' },
       { command: 'coupon', description: '🎟 Redeem a coupon' },
       { command: 'list', description: '📋 View monitored websites' },
+      { command: 'verified', description: '✅ View verified websites' },
+      { command: 'pending', description: '⏳ View pending websites' },
       { command: 'status', description: '🩺 Bot status & version' },
       { command: 'settings', description: '⚙️ Your settings & plan' },
       { command: 'help', description: '❓ Help & examples' }
@@ -1845,11 +1869,14 @@ async function handleCommand(env, msg, user) {
 
   if (cmd === '/email') {
     const value=String(args[0]||'').trim().toLowerCase();
-    if(!value) return void await send(env,chatId,`📧 <b>Email notifications</b>\n\nCurrent: ${user.notification_email?`<code>${esc(user.notification_email)}</code>`:'Not configured'}\n\nSet: <code>/email you@example.com</code>\nDisable: <code>/email off</code>\n\nEmail alerts can include downtime/recovery, security-relevant website changes and Pro/Team scheduled PDF reports.`);
+    if(!value) return void await send(env,chatId,`📧 <b>Email notifications</b>\n\nCurrent: ${user.notification_email?`<code>${esc(user.notification_email)}</code>`:'Not configured'}\n\nSet: <code>/email you@example.com</code>\nDisable: <code>/email off</code>\n\nEmail alerts can include downtime/recovery, security-relevant website changes and Pro/Team scheduled PDF reports.
+
+📤 Sender: WEB DOCTOR PRO admin Gmail SMTP
+📥 You only provide the email address that should receive alerts. No Gmail password or App Password is requested from users.`);
     if(value==='off'){ await env.DB.prepare('UPDATE users SET notification_email=NULL,updated_at=? WHERE id=?').bind(nowIso(),user.id).run(); return void await send(env,chatId,'✅ Email notifications disabled.'); }
     if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return void await send(env,chatId,'❌ Enter a valid email address.');
     await env.DB.prepare('UPDATE users SET notification_email=?,updated_at=? WHERE id=?').bind(value,nowIso(),user.id).run(); user.notification_email=value;
-    await send(env,chatId,`✅ <b>Email notifications enabled</b>\n\n📧 <code>${esc(value)}</code>\n\nIf the platform sender is configured, alerts will be delivered here.`);
+    await send(env,chatId,`✅ <b>Email notifications enabled</b>\n\n📧 <code>${esc(value)}</code>\n\nAlerts are sent from the single WEB DOCTOR PRO admin Gmail SMTP account to this address. You do not need to provide any Gmail password or App Password.`);
     await sendUserEmail(env,user,'WEB DOCTOR PRO email notifications enabled','Your WEB DOCTOR PRO email notifications are configured successfully.').catch(()=>false);
     return;
   }
@@ -1922,6 +1949,11 @@ async function handleCommand(env, msg, user) {
     await env.DB.prepare('UPDATE watches SET ga_property_id=?,updated_at=? WHERE id=?').bind(args[1], nowIso(), watch.id).run();
     return void await send(env, chatId, `✅ <b>Analytics property mapped</b>\n\n🌐 ${esc(domain)}\n📊 Property ID: <code>${esc(args[1])}</code>\n\nFuture full and scheduled reports will include available read-only Analytics metrics.`);
   }
+  if (['/verified','/pending','/pwnding'].includes(cmd)) {
+    const filter = cmd === '/verified' ? 'verified' : 'pending';
+    const v = await filteredSitesView(env, user.id, filter, false);
+    return void await send(env, chatId, v.text, { reply_markup: v.markup });
+  }
   if (cmd === '/list') {
     const rows = await env.DB.prepare(`SELECT d.name,d.expires_at,d.ssl_expires_at,w.verified_at,w.uptime_state,w.report_schedule,w.next_report_at FROM watches w JOIN domains d ON d.id=w.domain_id WHERE w.user_id=? AND w.active=1 ORDER BY d.name`).bind(user.id).all();
     if (!rows.results.length) return void await send(env, chatId, '📭 <b>No monitored websites yet</b>\n\nUse <code>/add example.com</code>.');
@@ -1951,6 +1983,14 @@ async function handleCallback(env, q) {
   if (data.startsWith('tz:')) {
     const tz = data.slice(3); if (await setTimezone(env, user.id, tz)) { await answerCb(env, q.id, `Timezone: ${tz}`); return send(env, q.message.chat.id, `✅ <b>Timezone set</b>\n\n🕒 ${esc(formatInTimezone(nowIso(), tz))}`); }
   }
+  if (data.startsWith('sites:')) {
+    const filter = data.slice('sites:'.length);
+    if (!['all','verified','pending'].includes(filter)) return answerCb(env,q.id,'Invalid filter.');
+    const v = await filteredSitesView(env, user.id, filter, false);
+    await answerCb(env,q.id,'Updated');
+    return edit(env,q.message.chat.id,q.message.message_id,v.text,{reply_markup:v.markup});
+  }
+
   if (data.startsWith('buyplan:')) {
     const plan = data.slice('buyplan:'.length);
     if (!['starter','pro','team'].includes(plan)) return answerCb(env, q.id, 'Invalid plan.');
