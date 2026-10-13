@@ -1,0 +1,12 @@
+{
+  "version": "1.5.1",
+  "old_len": 220662,
+  "new_len": 223615,
+  "old_sha256": "5cde45a0b00a8d3cf58a87a7d1e7ac26f58b9146c44b3f7b0573001c02468226",
+  "new_sha256": "1a65424637b556a2ea69e3101013d008912941ca18db7f839151038007c1b3c4",
+  "old_lines": 2663,
+  "ops": 9,
+  "patch_json_bytes": 4632,
+  "patch_gzip_bytes": 1957,
+  "patch_b64_chars": 2612
+}
