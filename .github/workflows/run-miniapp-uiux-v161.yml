@@ -1,0 +1,48 @@
+name: Mini App UI UX v1.6.1
+on:
+  push:
+    paths:
+      - '.github/workflows/run-miniapp-uiux-v161.yml'
+      - 'scripts/miniapp_uiux_v161.py'
+permissions:
+  contents: write
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply redesign
+        run: python3 scripts/miniapp_uiux_v161.py
+      - name: Add regression test
+        shell: bash
+        run: |
+          cat > test/miniapp-uiux.test.js <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import vm from 'node:vm';
+          import { MINI_APP_HTML } from '../src/miniapp.js';
+          test('v1.6.1 UX markers render',()=>{
+            for (const marker of ['healthStrip','Recent activity','domainOptions','filterBar','refreshBtn','busyBar','Try again']) assert.ok(MINI_APP_HTML.includes(marker),marker);
+          });
+          test('inline Mini App JavaScript parses',()=>{
+            const scripts=[...MINI_APP_HTML.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map(m=>m[1]).filter(Boolean).sort((a,b)=>b.length-a.length);
+            assert.doesNotThrow(()=>new vm.Script(scripts[0],{filename:'miniapp-inline.js'}));
+          });
+          EOF
+      - name: Test bot and Mini App
+        run: |
+          node --check src/index.js
+          node --check src/lib.js
+          node --check src/miniapp.js
+          npm test
+      - name: Commit upgrade
+        shell: bash
+        run: |
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add src/index.js src/miniapp.js package.json test/miniapp-uiux.test.js
+          git commit -m "feat: polish Telegram Mini App UI and UX"
+          git push
