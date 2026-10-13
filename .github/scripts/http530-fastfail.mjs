@@ -65,5 +65,6 @@ replace(
 fs.writeFileSync('src/index.js', s);
 const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); pkg.version='1.4.1'; fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n');
 let t=fs.readFileSync('test/platform.test.js','utf8');
+t=t.replace("assert.ok(source.includes(\"const VERSION = '1.4.0'\"));", "assert.ok(source.includes(\"const VERSION = '1.4.1'\"));");
 t += `\n\ntest('HTTP 530 fast-fails as invalid domain before checks', async () => {\n  const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');\n  assert.ok(source.includes(\"const VERSION = '1.4.1'\"));\n  assert.ok(source.includes('async function isHttp530Domain(domain)'));\n  assert.ok(source.includes('return r.status === 530'));\n  assert.ok(source.includes('if (await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));'));\n  assert.ok(source.includes('❌ <b>Invalid domain</b>'));\n});\n`;
 fs.writeFileSync('test/platform.test.js', t);
