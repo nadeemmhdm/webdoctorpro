@@ -1,0 +1,53 @@
+name: Prepare Mini App UI UX Deploy
+on:
+  push:
+    paths:
+      - '.github/workflows/prepare-miniapp-uiux-deploy.yml'
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build compact verified delta
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import subprocess, pathlib, hashlib, difflib, json, gzip, base64, shutil
+          OLD='a882669ecf3efec7182942a63ec0cf9dabad5866'
+          old=subprocess.check_output(['git','show',f'{OLD}:src/miniapp.js'])
+          new=pathlib.Path('src/miniapp.js').read_bytes()
+          old_text=old.decode('utf-8'); new_text=new.decode('utf-8')
+          a=old_text.splitlines(keepends=True); b=new_text.splitlines(keepends=True)
+          ops=[]
+          for tag,i1,i2,j1,j2 in difflib.SequenceMatcher(None,a,b,autojunk=False).get_opcodes():
+              if tag!='equal': ops.append({'start':i1,'end':i2,'text':''.join(b[j1:j2])})
+          payload=json.dumps({'ops':ops},ensure_ascii=False,separators=(',',':')).encode()
+          packed=gzip.compress(payload,9)
+          enc=base64.b64encode(packed).decode()
+          out=pathlib.Path('.deploy_uiux_v161'); shutil.rmtree(out,ignore_errors=True); out.mkdir()
+          chunk=6000
+          for i in range(0,len(enc),chunk): (out/f'patch-{i//chunk:02d}.txt').write_text(enc[i:i+chunk])
+          manifest={
+            'old_commit':OLD,
+            'new_commit':subprocess.check_output(['git','rev-parse','HEAD']).decode().strip(),
+            'old_sha256':hashlib.sha256(old).hexdigest(),
+            'new_sha256':hashlib.sha256(new).hexdigest(),
+            'old_bytes':len(old),'new_bytes':len(new),
+            'old_lines':len(a),'new_lines':len(b),'ops':len(ops),
+            'gzip_bytes':len(packed),'base64_chars':len(enc),'chunks':(len(enc)+chunk-1)//chunk
+          }
+          (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+          print(json.dumps(manifest,indent=2))
+          PY
+      - name: Commit payload
+        shell: bash
+        run: |
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add .deploy_uiux_v161
+          git commit -m "chore: stage verified v1.6.1 Mini App deploy delta"
+          git push
