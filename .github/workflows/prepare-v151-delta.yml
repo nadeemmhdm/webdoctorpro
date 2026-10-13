@@ -1,0 +1,63 @@
+name: Prepare WEB DOCTOR PRO v1.5.1 Delta
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/prepare-v151-delta.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  delta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build exact delta
+        run: |
+          set -euo pipefail
+          rm -rf .deploy_delta_v151
+          mkdir .deploy_delta_v151
+          node <<'NODE'
+          const fs=require('fs'),cp=require('child_process'),crypto=require('crypto'),zlib=require('zlib');
+          const oldRef='bee06a6fe6c17f87e255bb9d1322199b959d321a';
+          const newRef='2f29e95da60068532bab2bc9042cc1845896feaf';
+          function bundle(ref){
+            let lib=cp.execFileSync('git',['show',`${ref}:src/lib.js`],{encoding:'utf8'}).replace(/^export\s+/gm,'');
+            let idx=cp.execFileSync('git',['show',`${ref}:src/index.js`],{encoding:'utf8'});
+            idx=idx.replace(/^import\s*\{[\s\S]*?\}\s*from\s*['"]\.\/lib\.js['"];\s*/,'');
+            idx=idx.replace(/^export\s*\{[^\n]+\};\s*/m,'');
+            return lib+'\n'+idx;
+          }
+          const old=bundle(oldRef), neu=bundle(newRef);
+          const a=old.split('\n'),b=neu.split('\n');
+          const ops=[];
+          // create line delta using common prefix/suffix chunks iteratively
+          let i=0,j=0;
+          while(i<a.length||j<b.length){
+            if(a[i]===b[j]){i++;j++;continue;}
+            const si=i,sj=j; let found=null;
+            outer: for(let da=0;da<=80;da++) for(let db=0;db<=80;db++){
+              if(si+da<a.length && sj+db<b.length && a[si+da]===b[sj+db]){
+                let ok=0; while(ok<3 && a[si+da+ok]===b[sj+db+ok]) ok++;
+                if(ok>=3 || (si+da===a.length-1&&sj+db===b.length-1)){found=[da,db];break outer;}
+              }
+            }
+            if(!found){ ops.push({at:si,del:a.length-si,add:b.slice(sj)}); i=a.length;j=b.length; break; }
+            const [da,db]=found; ops.push({at:si,del:da,add:b.slice(sj,sj+db)}); i=si+da;j=sj+db;
+          }
+          const patch=JSON.stringify({oldSha:crypto.createHash('sha256').update(old).digest('hex'),newSha:crypto.createHash('sha256').update(neu).digest('hex'),ops});
+          const gz=zlib.gzipSync(Buffer.from(patch));
+          fs.writeFileSync('.deploy_delta_v151/patch.b64',gz.toString('base64'));
+          fs.writeFileSync('.deploy_delta_v151/manifest.json',JSON.stringify({version:'1.5.1',old_len:old.length,new_len:neu.length,old_sha256:crypto.createHash('sha256').update(old).digest('hex'),new_sha256:crypto.createHash('sha256').update(neu).digest('hex'),old_lines:a.length,ops:ops.length,patch_json_bytes:Buffer.byteLength(patch),patch_gzip_bytes:gz.length,patch_b64_chars:gz.toString('base64').length},null,2));
+          NODE
+          rm -f .github/workflows/prepare-v151-delta.yml
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: prepare verified v1.5.1 deployment delta"
+          git push
