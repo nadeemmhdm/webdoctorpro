@@ -1,0 +1,24 @@
+{
+  "version": "1.6.0",
+  "commit": "3560a6ef0f2b671e00eb137880ce0344b37e6079",
+  "raw_sha256": "aa592ff4e11303009d42324d144dafe28a8f57c3a21bebe5d89deba9b83c7de3",
+  "gzip_sha256": "77bcde7beec4912bc369e31ede646b9bf6dd9ca9848ad46a197b05a38187c957",
+  "raw_bytes": 289081,
+  "gzip_bytes": 75529,
+  "base64_chars": 100708,
+  "chunks": 17,
+  "files": {
+    "index.js": {
+      "chars": 214208,
+      "sha256": "646e425498eb6e1e435910d0253b0273c4124c4660f09223cef2558471d35235"
+    },
+    "lib.js": {
+      "chars": 26123,
+      "sha256": "b941641146393e48662c7e974c5c5d7226cc47f84eaecf999dfc133a3748d254"
+    },
+    "miniapp.js": {
+      "chars": 41136,
+      "sha256": "5de1a27281fd6d0edd9c1d928cf988b0917b8a2356c78e8913b2d022e6b01fc6"
+    }
+  }
+}
