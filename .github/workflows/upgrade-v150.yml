@@ -20,6 +20,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Apply guarded v1.5 patch
         run: python .github/scripts/upgrade-v150.py
+      - name: Normalize Cloudflare-only runtime import
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/index.js')
+          s=p.read_text()
+          s=s.replace("import { connect } from 'cloudflare:sockets';\n","")
+          old="const socket=connect({hostname:'smtp.gmail.com',port:465},{secureTransport:'on'}); await socket.opened;"
+          new="const { connect } = await import('cloudflare:sockets'); const socket=connect({hostname:'smtp.gmail.com',port:465},{secureTransport:'on'}); await socket.opened;"
+          if old not in s: raise SystemExit('missing SMTP socket anchor')
+          p.write_text(s.replace(old,new,1))
+          PY
       - name: Test and syntax check
         run: |
           npm test
