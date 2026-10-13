@@ -1,0 +1,70 @@
+name: Fix Mini App Runtime
+on:
+  push:
+    paths:
+      - '.github/workflows/fix-miniapp-runtime.yml'
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Preserve browser regex escapes in Mini App HTML
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/miniapp.js')
+          s=p.read_text()
+          old='export const MINI_APP_HTML = `'
+          new='export const MINI_APP_HTML = String.raw`'
+          if old not in s:
+              if new in s:
+                  print('String.raw already applied')
+              else:
+                  raise SystemExit('MINI_APP_HTML declaration not found')
+          else:
+              s=s.replace(old,new,1)
+              p.write_text(s)
+          PY
+          cat > test/miniapp-runtime.test.js <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import vm from 'node:vm';
+          import { MINI_APP_HTML } from '../src/miniapp.js';
+
+          test('Mini App inline browser script is valid JavaScript', () => {
+            const scripts = [...MINI_APP_HTML.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
+              .map((m) => m[1]).filter(Boolean).sort((a,b) => b.length-a.length);
+            assert.ok(scripts[0]?.includes('async function load()'));
+            assert.doesNotThrow(() => new vm.Script(scripts[0], { filename: 'miniapp-inline.js' }));
+          });
+
+          test('Mini App preserves domain and whitespace regex escapes', () => {
+            assert.ok(MINI_APP_HTML.includes("replace(/^https?:\\/\\//i,''"));
+            assert.ok(MINI_APP_HTML.includes("replace(/\\s+/g,''"));
+          });
+          EOF
+      - name: Run full regression suite
+        run: |
+          node --check src/miniapp.js
+          npm test
+          node --input-type=module <<'NODE'
+          import { MINI_APP_HTML } from './src/miniapp.js';
+          const scripts=[...MINI_APP_HTML.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map(m=>m[1]).filter(Boolean).sort((a,b)=>b.length-a.length);
+          await (await import('node:fs/promises')).writeFile('/tmp/mini-inline.js', scripts[0]||'');
+          NODE
+          node --check /tmp/mini-inline.js
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add src/miniapp.js test/miniapp-runtime.test.js
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "fix: prevent Mini App loading screen syntax failure"
+          git push
