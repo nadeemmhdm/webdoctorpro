@@ -1,0 +1,41 @@
+name: Verify Live Bundle Recipe
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/check-live-bundle-recipe.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reconstruct v1.5.1 candidates
+        run: |
+          python - <<'PY'
+          import subprocess,re,hashlib,json
+          old='2f29e95da60068532bab2bc9042cc1845896feaf'
+          idx=subprocess.check_output(['git','show',f'{old}:src/index.js'],text=True)
+          lib=subprocess.check_output(['git','show',f'{old}:src/lib.js'],text=True)
+          idx_no=re.sub(r"^import \{[\s\S]*?\} from './lib\.js';\n+",'',idx,count=1)
+          lib_no=re.sub(r'(?m)^export ','',lib)
+          candidates={
+            'a':lib_no+'\n'+idx_no,
+            'b':lib_no.rstrip()+'\n\n'+idx_no.lstrip(),
+            'c':lib_no.rstrip()+'\n'+idx_no.lstrip(),
+            'd':lib_no+'\n\n'+idx_no,
+          }
+          out={k:{'chars':len(v),'sha256':hashlib.sha256(v.encode()).hexdigest()} for k,v in candidates.items()}
+          open('.bundle-recipe.json','w').write(json.dumps(out,indent=2)+'\n')
+          print(json.dumps(out,indent=2))
+          PY
+      - name: Commit recipe result
+        run: |
+          rm -f .github/workflows/check-live-bundle-recipe.yml
+          git config user.name Nadeem
+          git config user.email 160517299+nadeemmhdm@users.noreply.github.com
+          git add -A
+          git commit -m "chore: record live bundle recipe hashes"
+          git push
