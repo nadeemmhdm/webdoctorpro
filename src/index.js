@@ -5,11 +5,11 @@ import {
 } from './lib.js';
 import { MINI_APP_HTML } from './miniapp.js';
 
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
-const MINI_APP_URL = `${PUBLIC_BASE_URL}/app?rev=20261013-1`;
+const MINI_APP_URL = `${PUBLIC_BASE_URL}/app?rev=20261013-2`;
 const LAST_UPDATED_AT = '2026-10-13T09:40:00+05:30';
 const ALERT_DAYS = [30, 14, 7, 3, 1, 0];
 const TELEGRAM_API = 'https://api.telegram.org';
