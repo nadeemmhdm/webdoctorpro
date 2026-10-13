@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Build exact old and new Worker bundles and compact delta
+      - name: Build exact old and new Worker bundles and compact line delta
         run: |
           set -euo pipefail
           OLD=74e4c872f6a962f73d587e70411c5c60bda3d609
@@ -44,17 +44,18 @@ jobs:
           from pathlib import Path
           old=Path('/tmp/old-worker.js').read_text()
           new=Path('/tmp/new-worker.js').read_text()
-          sm=difflib.SequenceMatcher(None, old, new, autojunk=False)
+          a=old.splitlines(keepends=True); b=new.splitlines(keepends=True)
+          sm=difflib.SequenceMatcher(None,a,b,autojunk=False)
           ops=[]
-          for tag,a,b,c,d in sm.get_opcodes():
-              if tag!='equal': ops.append([a,b,new[c:d]])
-          payload={'old_len':len(old),'new_len':len(new),'old_sha256':hashlib.sha256(old.encode()).hexdigest(),'new_sha256':hashlib.sha256(new.encode()).hexdigest(),'ops':ops}
+          for tag,i1,i2,j1,j2 in sm.get_opcodes():
+              if tag!='equal': ops.append([i1,i2,''.join(b[j1:j2])])
+          payload={'old_len':len(old),'new_len':len(new),'old_sha256':hashlib.sha256(old.encode()).hexdigest(),'new_sha256':hashlib.sha256(new.encode()).hexdigest(),'old_lines':len(a),'ops':ops}
           raw=json.dumps(payload,separators=(',',':'),ensure_ascii=False).encode()
           gz=gzip.compress(raw,compresslevel=9)
           b64=base64.b64encode(gz).decode()
           Path('.deploy_delta_v141').mkdir(exist_ok=True)
           Path('.deploy_delta_v141/patch.b64').write_text(b64)
-          Path('.deploy_delta_v141/manifest.json').write_text(json.dumps({'old_len':len(old),'new_len':len(new),'old_sha256':payload['old_sha256'],'new_sha256':payload['new_sha256'],'ops':len(ops),'patch_json_bytes':len(raw),'patch_gzip_bytes':len(gz),'patch_b64_chars':len(b64)},indent=2))
+          Path('.deploy_delta_v141/manifest.json').write_text(json.dumps({'old_len':len(old),'new_len':len(new),'old_sha256':payload['old_sha256'],'new_sha256':payload['new_sha256'],'old_lines':len(a),'ops':len(ops),'patch_json_bytes':len(raw),'patch_gzip_bytes':len(gz),'patch_b64_chars':len(b64)},indent=2))
           print(Path('.deploy_delta_v141/manifest.json').read_text())
           PY
           rm -f .github/workflows/prepare-v141-delta.yml
