@@ -33,8 +33,8 @@ ps = pkg.read_text().replace('"version": "1.6.1"', '"version": "1.6.2"', 1)
 pkg.write_text(ps)
 
 t = Path('test/platform.test.js')
-ts = t.read_text().replace('1.6.1', '1.6.2')
-ts += """
+ts = t.read_text().replace('1.6.1', '1.6.2').replace(r'1\.6\.1', r'1\.6\.2')
+ts += r"""
 
 test('v1.6.2 suppresses benign dynamic edge IP rotation alerts', async () => {
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
