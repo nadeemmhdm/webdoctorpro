@@ -1,0 +1,38 @@
+name: WEB DOCTOR PRO v1.6 Mini App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/add-miniapp-v160.yml
+      - .github/scripts/add-miniapp-v160.py
+      - src/miniapp.js
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply Mini App backend patch
+        run: python .github/scripts/add-miniapp-v160.py
+      - name: Test and syntax check
+        run: |
+          npm test
+          npm run check
+          node --check src/miniapp.js
+          test "$(node -p "require('./package.json').version")" = "1.6.0"
+          grep -q "url.pathname === '/app'" src/index.js
+          grep -q "validateMiniAppInitData" src/index.js
+          grep -q "setChatMenuButton" src/index.js
+      - name: Commit production source
+        run: |
+          rm -f .github/workflows/add-miniapp-v160.yml .github/scripts/add-miniapp-v160.py
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: WEB DOCTOR PRO v1.6 Telegram Mini App dashboard"
+          git push
