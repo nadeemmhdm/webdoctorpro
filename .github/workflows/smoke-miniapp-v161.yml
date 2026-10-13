@@ -1,0 +1,42 @@
+name: Smoke Mini App v1.6.1
+on:
+  push:
+    paths:
+      - '.github/workflows/smoke-miniapp-v161.yml'
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify live Mini App
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='https://webdoctorpro.nadeemmhdm-ai.workers.dev'
+          curl -fsS --max-time 20 -D /tmp/headers.txt "$base/app?rev=20261013-2" -o /tmp/app.html
+          grep -qi '^cache-control:.*no-store' /tmp/headers.txt
+          grep -q 'v1.6.1 UX polish' /tmp/app.html
+          grep -q 'healthStrip' /tmp/app.html
+          grep -q 'Recent activity' /tmp/app.html
+          grep -q 'filterBar' /tmp/app.html
+          grep -q 'refreshBtn' /tmp/app.html
+          grep -q 'busyBar' /tmp/app.html
+          grep -q 'Try again' /tmp/app.html
+          node <<'NODE'
+          const fs=require('fs');
+          const html=fs.readFileSync('/tmp/app.html','utf8');
+          const scripts=[...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map(m=>m[1]).filter(Boolean).sort((a,b)=>b.length-a.length);
+          if(!scripts.length) throw new Error('inline script missing');
+          fs.writeFileSync('/tmp/inline.js',scripts[0]);
+          if(!scripts[0].includes('renderTools(); load();')) throw new Error('startup missing');
+          NODE
+          node --check /tmp/inline.js
+          code=$(curl -sS --max-time 20 -o /tmp/bootstrap.json -w '%{http_code}' "$base/api/mini/bootstrap")
+          test "$code" = '401'
+          grep -q 'authentication failed' /tmp/bootstrap.json
+          curl -fsS --max-time 20 "$base/health" -o /tmp/health.json
+          grep -q '"version":"1.6.1"' /tmp/health.json
