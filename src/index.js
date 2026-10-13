@@ -5,7 +5,7 @@ import {
 } from './lib.js';
 import { MINI_APP_HTML } from './miniapp.js';
 
-const VERSION = '1.6.1';
+const VERSION = '1.6.2';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
@@ -594,9 +594,13 @@ async function captureChangeSnapshot(env, domain) {
 function snapshotChangeList(oldSnap,newSnap){
   const out=[]; const add=(kind,label,a,b)=>out.push({kind,label,oldValue:String(a??''),newValue:String(b??'')});
   const j=(x)=>JSON.stringify(x||[]);
+  const dynamicEdgeProviders=new Set(['Vercel','Cloudflare','Netlify','GitHub Pages']);
+  const sameEdgeProvider=Boolean(oldSnap.hostingProvider && oldSnap.hostingProvider===newSnap.hostingProvider && dynamicEdgeProviders.has(newSnap.hostingProvider));
+  const sameDnsContext=j(oldSnap.ns)===j(newSnap.ns) && oldSnap.dnsProvider===newSnap.dnsProvider;
+  const suppressEdgeIpRotation=sameEdgeProvider && sameDnsContext;
   if(j(oldSnap.ns)!==j(newSnap.ns)) add('nameserver','Nameserver changed',oldSnap.ns?.join(', '),newSnap.ns?.join(', '));
-  if(j(oldSnap.a)!==j(newSnap.a)) add('a-record','A record changed',oldSnap.a?.join(', '),newSnap.a?.join(', '));
-  if(j(oldSnap.aaaa)!==j(newSnap.aaaa)) add('aaaa-record','AAAA record changed',oldSnap.aaaa?.join(', '),newSnap.aaaa?.join(', '));
+  if(j(oldSnap.a)!==j(newSnap.a) && !suppressEdgeIpRotation) add('a-record','A record changed',oldSnap.a?.join(', '),newSnap.a?.join(', '));
+  if(j(oldSnap.aaaa)!==j(newSnap.aaaa) && !suppressEdgeIpRotation) add('aaaa-record','AAAA record changed',oldSnap.aaaa?.join(', '),newSnap.aaaa?.join(', '));
   if(j(oldSnap.mx)!==j(newSnap.mx)) add('mx-record','MX record changed',oldSnap.mx?.join(', '),newSnap.mx?.join(', '));
   if(oldSnap.ssl!==newSnap.ssl) add('ssl','SSL certificate changed',oldSnap.ssl,newSnap.ssl);
   if(oldSnap.registrar!==newSnap.registrar) add('registrar','Registrar changed',oldSnap.registrar,newSnap.registrar);
