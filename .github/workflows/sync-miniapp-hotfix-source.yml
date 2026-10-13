@@ -1,0 +1,62 @@
+name: Sync Mini App Hotfix Source
+on:
+  push:
+    paths:
+      - '.github/workflows/sync-miniapp-hotfix-source.yml'
+permissions:
+  contents: write
+jobs:
+  sync-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Sync production cache-bust settings to source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/index.js')
+          s=p.read_text()
+          s=s.replace('const MINI_APP_URL = `${PUBLIC_BASE_URL}/app`;', 'const MINI_APP_URL = `${PUBLIC_BASE_URL}/app?rev=20261013-1`;')
+          s=s.replace("'cache-control':'public, max-age=300'", "'cache-control':'no-store, max-age=0'")
+          if 'app?rev=20261013-1' not in s or "'cache-control':'no-store, max-age=0'" not in s:
+              raise SystemExit('hotfix source markers missing')
+          p.write_text(s)
+          PY
+      - name: Run repository regression tests
+        run: |
+          node --check src/index.js
+          node --check src/miniapp.js
+          npm test
+      - name: Smoke-test live Mini App HTML and API
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 20 -D /tmp/headers.txt 'https://webdoctorpro.nadeemmhdm-ai.workers.dev/app?rev=20261013-1' -o /tmp/app.html
+          grep -qi '^cache-control:.*no-store' /tmp/headers.txt
+          grep -q 'WEB DOCTOR PRO' /tmp/app.html
+          node <<'NODE'
+          const fs=require('fs');
+          const html=fs.readFileSync('/tmp/app.html','utf8');
+          const scripts=[...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map(m=>m[1]).filter(Boolean).sort((a,b)=>b.length-a.length);
+          if(!scripts.length) throw new Error('inline script missing');
+          fs.writeFileSync('/tmp/live-inline.js',scripts[0]);
+          if(!scripts[0].includes("replace(/^https?:\\/\\//i,''")) throw new Error('domain regex escaping is broken');
+          if(!scripts[0].includes('renderTools(); load();')) throw new Error('load startup missing');
+          NODE
+          node --check /tmp/live-inline.js
+          code=$(curl -sS --max-time 20 -o /tmp/bootstrap.txt -w '%{http_code}' 'https://webdoctorpro.nadeemmhdm-ai.workers.dev/api/mini/bootstrap')
+          test "$code" = "401"
+          curl -fsS --max-time 20 'https://webdoctorpro.nadeemmhdm-ai.workers.dev/health' | grep -q '"version":"1.6.0"'
+      - name: Commit source sync
+        shell: bash
+        run: |
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add src/index.js
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "fix: keep Mini App hotfix cache-safe"
+          git push
