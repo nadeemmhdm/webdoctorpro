@@ -4,11 +4,11 @@ import {
   parseCertSpotter, fallbackKeywords, normalizeTxtRecord, parsePageSpeed, scheduleIntervalMs, buildReportPdf
 } from './lib.js';
 
-const VERSION = '1.3.1';
+const VERSION = '1.4.0';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
-const LAST_UPDATED_AT = '2026-10-12T18:32:00+05:30';
+const LAST_UPDATED_AT = '2026-10-13T07:02:00+05:30';
 const ALERT_DAYS = [30, 14, 7, 3, 1, 0];
 const TELEGRAM_API = 'https://api.telegram.org';
 const MAX_HTML_BYTES = 700_000;
@@ -25,16 +25,18 @@ const SPINNER = ['◐', '◓', '◑', '◒'];
 const PLAN_CONFIG = Object.freeze({
   free: { label: 'Free', stars: 0, dailyScans: 5, dailyReports: 1, maxDomains: 1, schedules: ['weekly'], adEvery: 1 },
   starter: { label: 'Starter', stars: 49, dailyScans: 25, dailyReports: 5, maxDomains: 5, schedules: ['daily', 'weekly'], adEvery: 5 },
-  pro: { label: 'Pro', stars: 129, dailyScans: 100, dailyReports: 20, maxDomains: 25, schedules: ['daily', 'weekly', 'monthly'], adEvery: 0 }
+  pro: { label: 'Pro', stars: 129, dailyScans: 100, dailyReports: 20, maxDomains: 25, schedules: ['daily', 'weekly', 'monthly'], adEvery: 0 },
+  team: { label: 'Team', stars: 299, dailyScans: 250, dailyReports: 50, maxDomains: 50, schedules: ['daily', 'weekly', 'monthly'], adEvery: 0 }
 });
 const SUBSCRIPTION_PERIOD = 2592000;
+const TEAM_ACTIVATION_TTL_MS = 24 * 3600000;
 const ADMIN_TELEGRAM_ID = '8984229401';
 const REFERRAL_REFERRER_COINS = 25;
 const REFERRAL_NEW_USER_COINS = 10;
 const AD_VISIBLE_MS = 60000;
 const BROADCAST_BATCH = 20;
 
-function planRank(plan) { return plan === 'pro' ? 2 : plan === 'starter' ? 1 : 0; }
+function planRank(plan) { return plan === 'team' ? 3 : plan === 'pro' ? 2 : plan === 'starter' ? 1 : 0; }
 function activePlan(user) {
   const plan = PLAN_CONFIG[user?.plan] ? user.plan : 'free';
   if (plan === 'free') return 'free';
@@ -192,11 +194,14 @@ async function adminSetExactPlan(env, target, plan, days = 30) {
   if (plan === 'free') {
     await env.DB.prepare(`UPDATE users SET plan='free',plan_expires_at=NULL,subscription_auto_renew=0,subscription_charge_id=NULL,updated_at=? WHERE id=?`)
       .bind(nowIso(), target.id).run();
+    await env.DB.prepare('UPDATE team_chats SET active=0,updated_at=? WHERE owner_user_id=? AND active=1').bind(nowIso(), target.id).run();
     return null;
   }
   const expiry = addDays(null, Math.max(1, Math.min(3650, Number(days || 30))));
   await env.DB.prepare(`UPDATE users SET plan=?,plan_expires_at=?,subscription_auto_renew=0,subscription_charge_id=NULL,updated_at=? WHERE id=?`)
     .bind(plan, expiry, nowIso(), target.id).run();
+  if (plan === 'team') await syncTeamWorkspaceExpiry(env, target.id, expiry);
+  else await env.DB.prepare('UPDATE team_chats SET active=0,updated_at=? WHERE owner_user_id=? AND active=1').bind(nowIso(), target.id).run();
   return expiry;
 }
 
@@ -235,6 +240,143 @@ async function claimGift(env, q, user, giftId) {
   return edit(env, q.message.chat.id, q.message.message_id, `🎁 <b>Gift opened!</b>\n\n🪙 You received <b>${gift.coins} coins</b>.\n💰 Balance: <b>${Number(bal?.coins || 0)} coins</b>`);
 }
 
+
+function teamCodeFromText(text) {
+  const clean = String(text || '').trim().replace(/^\/team_activate(?:@\w+)?\s+/i, '').trim().toUpperCase();
+  return /^WDP-TEAM-[A-F0-9]{10}$/.test(clean) ? clean : null;
+}
+function isTelegramAdminStatus(status) { return status === 'administrator' || status === 'creator'; }
+async function isTelegramChatAdmin(env, chatId, userId) {
+  try { const m = await tg(env, 'getChatMember', { chat_id: chatId, user_id: Number(userId) }); return isTelegramAdminStatus(m?.status); }
+  catch { return false; }
+}
+async function teamAccessForChat(env, chatId) {
+  const workspace = await env.DB.prepare('SELECT * FROM team_chats WHERE chat_id=? AND active=1 AND plan_expires_at>? ORDER BY id DESC LIMIT 1').bind(String(chatId), nowIso()).first();
+  if (!workspace) return null;
+  const owner = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(workspace.owner_user_id).first();
+  if (!owner || owner.blocked || activePlan(owner) !== 'team') {
+    await env.DB.prepare('UPDATE team_chats SET active=0,updated_at=? WHERE id=?').bind(nowIso(), workspace.id).run();
+    return null;
+  }
+  return { workspace, owner };
+}
+async function syncTeamWorkspaceExpiry(env, ownerUserId, expiry) {
+  await env.DB.prepare('UPDATE team_chats SET plan_expires_at=?,updated_at=? WHERE owner_user_id=? AND active=1').bind(expiry, nowIso(), ownerUserId).run();
+}
+async function issueTeamActivationCode(env, userId) {
+  const user = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(userId).first();
+  if (!user || activePlan(user) !== 'team') throw new Error('An active Team plan is required.');
+  await env.DB.prepare('DELETE FROM team_activation_codes WHERE user_id=? AND used_at IS NULL').bind(user.id).run();
+  const code = `WDP-TEAM-${randomHex(5).toUpperCase()}`;
+  const planEnd = user.plan_expires_at ? new Date(user.plan_expires_at).getTime() : Date.now() + TEAM_ACTIVATION_TTL_MS;
+  const expiresAt = new Date(Math.min(Date.now() + TEAM_ACTIVATION_TTL_MS, planEnd)).toISOString();
+  await env.DB.prepare('INSERT INTO team_activation_codes(user_id,code,expires_at,created_at) VALUES(?,?,?,?)').bind(user.id, code, expiresAt, nowIso()).run();
+  return { code, expiresAt };
+}
+async function pendingTeamActivationCode(env, userId) {
+  return env.DB.prepare('SELECT * FROM team_activation_codes WHERE user_id=? AND used_at IS NULL AND expires_at>? ORDER BY id DESC LIMIT 1').bind(userId, nowIso()).first();
+}
+async function activateTeamWorkspace(env, chat, purchaser, code) {
+  if (!chat || !['group','supergroup','channel'].includes(chat.type)) return { ok: false, reason: 'Choose a Telegram group, supergroup or channel.' };
+  const fresh = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(purchaser.id).first();
+  if (!fresh || activePlan(fresh) !== 'team') return { ok: false, reason: 'Your Team plan is not active.' };
+  const row = await env.DB.prepare('SELECT * FROM team_activation_codes WHERE code=?').bind(String(code).toUpperCase()).first();
+  if (!row || Number(row.user_id) !== Number(fresh.id)) return { ok: false, reason: 'This activation code does not belong to this purchaser.' };
+  if (row.used_at) return { ok: false, reason: 'This activation code has already been used.' };
+  if (new Date(row.expires_at).getTime() <= Date.now()) return { ok: false, reason: 'This activation code expired. Open the bot privately and use /team_code for a new 24-hour code.' };
+  const me = await tg(env, 'getMe', {});
+  const botIsAdmin = await isTelegramChatAdmin(env, chat.id, me.id);
+  if (!botIsAdmin) return { ok: false, reason: 'Make WEB DOCTOR PRO an administrator in this chat first, then try again.' };
+  const purchaserIsAdmin = await isTelegramChatAdmin(env, chat.id, fresh.telegram_user_id);
+  if (!purchaserIsAdmin) return { ok: false, reason: 'The Team purchaser must also be an administrator of the target chat.' };
+  const expiry = fresh.plan_expires_at || addDays(null, 30);
+  await env.DB.prepare('UPDATE team_chats SET active=0,updated_at=? WHERE owner_user_id=? AND active=1').bind(nowIso(), fresh.id).run();
+  await env.DB.prepare(`INSERT INTO team_chats(chat_id,owner_user_id,chat_type,title,plan_expires_at,active,activated_at,updated_at)
+    VALUES(?,?,?,?,?,1,?,?)
+    ON CONFLICT(chat_id) DO UPDATE SET owner_user_id=excluded.owner_user_id,chat_type=excluded.chat_type,title=excluded.title,plan_expires_at=excluded.plan_expires_at,active=1,activated_at=excluded.activated_at,updated_at=excluded.updated_at`)
+    .bind(String(chat.id), fresh.id, chat.type, chat.title || chat.username || 'Team Workspace', expiry, nowIso(), nowIso()).run();
+  await env.DB.prepare('UPDATE team_activation_codes SET used_at=?,used_chat_id=? WHERE id=? AND used_at IS NULL').bind(nowIso(), String(chat.id), row.id).run();
+  return { ok: true, expiry, workspaceTitle: chat.title || chat.username || 'Team Workspace' };
+}
+async function teamAccountView(env, user) {
+  const fresh = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
+  const plan = activePlan(fresh);
+  const workspace = await env.DB.prepare('SELECT * FROM team_chats WHERE owner_user_id=? AND active=1 ORDER BY id DESC LIMIT 1').bind(fresh.id).first();
+  const pending = await pendingTeamActivationCode(env, fresh.id);
+  let text = `🏢 <b>Team Workspace</b>\n\n💎 Plan: <b>${PLAN_CONFIG[plan].label}</b>`;
+  if (plan !== 'team') text += '\n\nTeam access is not active. Purchase Team from /plans.';
+  else {
+    text += `\n📅 Plan until: ${esc(formatInTimezone(fresh.plan_expires_at, fresh.timezone_configured ? fresh.timezone : 'UTC'))}`;
+    if (workspace && new Date(workspace.plan_expires_at).getTime() > Date.now()) text += `\n\n✅ <b>Active workspace</b>\n${esc(workspace.title || workspace.chat_id)}\nType: ${esc(workspace.chat_type)}`;
+    else text += '\n\n⚪ No active group/channel yet.';
+    if (pending) text += `\n\n🔑 24-hour activation code\n<code>${esc(pending.code)}</code>\nExpires: ${esc(formatInTimezone(pending.expires_at, fresh.timezone_configured ? fresh.timezone : 'UTC'))}`;
+    text += '\n\n<b>Group / Supergroup</b>\n1. Add this bot and make it admin.\n2. The Team purchaser sends the code in that group.\n3. Only that purchaser can activate it.\n\n<b>Channel</b>\nAdd the bot as admin, then activate privately with:\n<code>/team_activate CODE @channelusername</code>';
+  }
+  const rows = [];
+  if (plan === 'team') rows.push([{ text: '🔑 New 24h Code', callback_data: 'teamcode:new' }]);
+  rows.push([{ text: '💎 View Plans', callback_data: 'team:plans' }]);
+  return { text, markup: { inline_keyboard: rows } };
+}
+async function teamWorkspaceStatusText(env, access) {
+  const usage = await dailyUsage(env, access.owner), cfg = PLAN_CONFIG.team;
+  return `🏢 <b>Team Workspace Active</b>\n\n✅ ${esc(access.workspace.title || access.workspace.chat_id)}\n💎 Team plan\n📅 Until: ${esc(formatInTimezone(access.workspace.plan_expires_at, access.owner.timezone_configured ? access.owner.timezone : 'UTC'))}\n📊 Shared usage today: ${usage.row.scan_count || 0}/${cfg.dailyScans} checks • ${usage.row.report_count || 0}/${cfg.dailyReports} PDFs\n🌐 Shared monitored sites: up to ${cfg.maxDomains}\n📣 Ads: Off`;
+}
+async function handleTeamChatUpdate(env, msg) {
+  const chatId = msg.chat?.id; if (!chatId) return;
+  const text = String(msg.text || msg.caption || '').trim();
+  const code = teamCodeFromText(text);
+  if (code) {
+    if (!msg.from?.id) return send(env, chatId, '🔐 For channels, the purchaser must activate from the bot private chat with <code>/team_activate CODE @channelusername</code>.');
+    const purchaser = await env.DB.prepare('SELECT * FROM users WHERE telegram_user_id=?').bind(String(msg.from.id)).first();
+    if (!purchaser) return send(env, chatId, '❌ Only the Team plan purchaser can activate this code. Open the bot privately first.');
+    const result = await activateTeamWorkspace(env, msg.chat, purchaser, code);
+    if (!result.ok) return send(env, chatId, `❌ <b>Team activation failed</b>\n\n${esc(result.reason)}`);
+    return send(env, chatId, `🎉 <b>Team plan activated for this chat</b>\n\n🏢 ${esc(result.workspaceTitle)}\n💎 Shared Team features are now available.\n📅 Access until: ${esc(formatInTimezone(result.expiry, purchaser.timezone_configured ? purchaser.timezone : 'UTC'))}\n\nUse /team_status or send a domain.`);
+  }
+  const access = await teamAccessForChat(env, chatId);
+  if (!access) {
+    if (/^\/(team|team_status|plans)(?:@\w+)?\b/i.test(text)) return send(env, chatId, '🏢 <b>Team plan is not active in this chat</b>\n\nThe Team purchaser should add the bot as admin and send their 24-hour activation code here.');
+    return;
+  }
+  if (!text) return;
+  const [rawCmd, ...args] = text.split(/\s+/), cmd = rawCmd.toLowerCase().split('@')[0];
+  if (cmd === '/team' || cmd === '/team_status' || cmd === '/status') return send(env, chatId, await teamWorkspaceStatusText(env, access));
+  if (cmd === '/help') return send(env, chatId, '🏢 <b>Team commands</b>\n\n/check domain\n/scan domain\n/seo domain\n/performance domain\n/ssl domain\n/provider domain\n/links domain\n/robots domain\n/keywords domain\n/add domain\n/verify domain\n/schedule domain weekly\n/list\n/remove domain\n/team_status\n\nTeam usage, verified sites and limits are shared through the purchaser account.');
+  if (cmd === '/plans') return send(env, chatId, plansText(access.owner));
+  const toolMap = { '/check':'check','/scan':'scan','/seo':'seo','/performance':'performance','/ssl':'ssl','/provider':'provider','/links':'links','/robots':'robots','/keywords':'keywords' };
+  if (toolMap[cmd]) {
+    if (!args[0]) return send(env, chatId, '💡 Add a domain after the command. Example: <code>/check example.com</code>');
+    let domain; try { domain = normalizeDomain(args[0]); } catch { return send(env, chatId, '❌ Invalid domain.'); }
+    return runTool(env, chatId, access.owner, toolMap[cmd], domain);
+  }
+  if (cmd === '/add' || cmd === '/verify') {
+    if (!args[0]) return send(env, chatId, `💡 Usage: <code>${cmd} example.com</code>`);
+    let domain; try { domain = normalizeDomain(args[0]); } catch { return send(env, chatId, '❌ Invalid domain.'); }
+    return cmd === '/add' ? handleAdd(env, chatId, access.owner, domain) : handleVerify(env, chatId, access.owner, domain);
+  }
+  if (cmd === '/schedule') {
+    if (!args[0] || !args[1]) return send(env, chatId, '💡 Usage: <code>/schedule example.com weekly</code>');
+    let domain; try { domain = normalizeDomain(args[0]); } catch { return send(env, chatId, '❌ Invalid domain.'); }
+    return setSchedule(env, chatId, access.owner, domain, args[1].toLowerCase());
+  }
+  if (cmd === '/list') {
+    const rows = await env.DB.prepare(`SELECT d.name,w.verified_at,w.uptime_state,w.report_schedule FROM watches w JOIN domains d ON d.id=w.domain_id WHERE w.user_id=? AND w.active=1 ORDER BY d.name`).bind(access.owner.id).all();
+    const lines = rows.results.map((r,i) => `${i+1}. 🌐 <b>${esc(r.name)}</b> • ${r.verified_at ? '✅ verified' : '⏳ pending'} • ${esc(r.uptime_state || 'unknown')} • reports ${esc(r.report_schedule || 'off')}`);
+    return send(env, chatId, lines.length ? `📋 <b>Team Monitored Websites</b>\n\n${lines.join('\n')}` : '📭 No Team websites are monitored yet.');
+  }
+  if (cmd === '/remove') {
+    if (!msg.from?.id || !(await isTelegramChatAdmin(env, chatId, msg.from.id))) return send(env, chatId, '🔒 Only a chat administrator can remove a Team-monitored site.');
+    if (!args[0]) return send(env, chatId, '💡 Usage: <code>/remove example.com</code>');
+    let domain; try { domain = normalizeDomain(args[0]); } catch { return send(env, chatId, '❌ Invalid domain.'); }
+    const r = await env.DB.prepare(`UPDATE watches SET active=0,updated_at=? WHERE user_id=? AND domain_id=(SELECT id FROM domains WHERE name=?)`).bind(nowIso(), access.owner.id, domain).run();
+    return send(env, chatId, r.meta.changes ? `✅ Monitoring stopped for <b>${esc(domain)}</b>.` : `ℹ️ ${esc(domain)} was not being monitored.`);
+  }
+  if (!text.startsWith('/')) {
+    let domain; try { domain = normalizeDomain(text); } catch { return; }
+    return runTool(env, chatId, access.owner, 'check', domain);
+  }
+}
+
 async function dailyUsage(env, user) {
   const dayKey = localDayKey(user.timezone_configured ? user.timezone : 'UTC');
   const row = await env.DB.prepare('SELECT * FROM usage_daily WHERE user_id=? AND day_key=?').bind(user.id, dayKey).first();
@@ -251,10 +393,10 @@ async function consumeUsage(env, user, { report = false, incrementAd = false } =
 }
 function plansText(user) {
   const current = activePlan(user), until = user?.plan_expires_at && current !== 'free' ? ` until ${user.plan_expires_at.slice(0, 10)}` : '';
-  return `💎 <b>WEB DOCTOR PRO Plans</b>\n\n🆓 <b>Free</b>\n• 5 checks/day • 1 PDF/day • 1 monitored site\n• Weekly reports • Ads after scans\n\n⭐ <b>Starter — 49 Stars / 30 days</b>\n• 25 checks/day • 5 PDFs/day • 5 monitored sites\n• Daily + weekly reports • Fewer ads\n\n👑 <b>Pro — 129 Stars / 30 days</b>\n• 100 checks/day • 20 PDFs/day • 25 monitored sites\n• Daily/weekly/monthly reports • No ads\n\n📌 Current plan: <b>${PLAN_CONFIG[current].label}${esc(until)}</b>\n\nTelegram handles recurring Star subscription payments.`;
+  return `💎 <b>WEB DOCTOR PRO Plans</b>\n\n🆓 <b>Free</b>\n• 5 checks/day • 1 PDF/day • 1 monitored site\n• Weekly reports • Ads after scans\n\n⭐ <b>Starter — 49 Stars / 30 days</b>\n• 25 checks/day • 5 PDFs/day • 5 monitored sites\n• Daily + weekly reports • Fewer ads\n\n👑 <b>Pro — 129 Stars / 30 days</b>\n• 100 checks/day • 20 PDFs/day • 25 monitored sites\n• Daily/weekly/monthly reports • No ads\n\n🏢 <b>Team — 299 Stars / 30 days</b>\n• 250 shared checks/day • 50 PDFs/day • 50 monitored sites\n• Group/channel workspace access • No ads\n• One active Team workspace per subscription\n\n📌 Current plan: <b>${PLAN_CONFIG[current].label}${esc(until)}</b>\n\nTelegram handles recurring Star subscription payments. Team activation codes are valid for 24 hours.`;
 }
 function plansMarkup() {
-  return { inline_keyboard: [[{ text: '⭐ Starter — 49 Stars', callback_data: 'buyplan:starter' }], [{ text: '👑 Pro — 129 Stars', callback_data: 'buyplan:pro' }], [{ text: '🎟 Redeem Coupon', callback_data: 'couponhelp:show' }]] };
+  return { inline_keyboard: [[{ text: '⭐ Starter — 49 Stars', callback_data: 'buyplan:starter' }], [{ text: '👑 Pro — 129 Stars', callback_data: 'buyplan:pro' }], [{ text: '🏢 Team — 299 Stars', callback_data: 'buyplan:team' }], [{ text: '🎟 Redeem Coupon', callback_data: 'couponhelp:show' }]] };
 }
 async function sendPlanInvoice(env, chatId, user, plan) {
   const cfg = PLAN_CONFIG[plan]; if (!cfg || !cfg.stars) throw new Error('Invalid paid plan.');
@@ -272,22 +414,28 @@ async function sendPlanInvoice(env, chatId, user, plan) {
   });
 }
 async function handlePreCheckout(env, q) {
-  const payload = String(q.invoice_payload || ''), m = /^sub:(starter|pro):(\d+):/.exec(payload);
+  const payload = String(q.invoice_payload || ''), m = /^sub:(starter|pro|team):(\d+):/.exec(payload);
   if (!m) return tg(env, 'answerPreCheckoutQuery', { pre_checkout_query_id: q.id, ok: false, error_message: 'Invalid subscription invoice.' });
   const user = await env.DB.prepare('SELECT * FROM users WHERE telegram_user_id=?').bind(String(q.from?.id || '')).first();
   const ok = Boolean(user && !user.blocked && Number(user.id) === Number(m[2]) && Number(q.total_amount) === PLAN_CONFIG[m[1]].stars && q.currency === 'XTR');
   return tg(env, 'answerPreCheckoutQuery', { pre_checkout_query_id: q.id, ok, ...(ok ? {} : { error_message: 'This subscription invoice is no longer valid.' }) });
 }
 async function handleSuccessfulPayment(env, msg, user) {
-  const p = msg.successful_payment, m = /^sub:(starter|pro):(\d+):/.exec(String(p?.invoice_payload || ''));
+  const p = msg.successful_payment, m = /^sub:(starter|pro|team):(\d+):/.exec(String(p?.invoice_payload || ''));
   if (!m || Number(m[2]) !== Number(user.id) || p.currency !== 'XTR') return;
   const plan = m[1], cfg = PLAN_CONFIG[plan]; if (Number(p.total_amount) !== cfg.stars) return;
   const expiry = p.subscription_expiration_date ? new Date(Number(p.subscription_expiration_date) * 1000).toISOString() : addDays(user.plan_expires_at, 30);
   await env.DB.prepare(`INSERT OR IGNORE INTO star_payments(user_id,plan,amount,currency,invoice_payload,telegram_charge_id,provider_charge_id,subscription_expiration_date,is_recurring,is_first_recurring,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
     .bind(user.id, plan, p.total_amount, p.currency, p.invoice_payload, p.telegram_payment_charge_id, p.provider_payment_charge_id || null, expiry, p.is_recurring ? 1 : 0, p.is_first_recurring ? 1 : 0, nowIso()).run();
   await extendPlan(env, user.id, plan, 30, { autoRenew: Boolean(p.is_recurring), chargeId: p.telegram_payment_charge_id, absoluteExpiry: expiry });
+  let teamActivation = null;
+  if (plan === 'team') {
+    await syncTeamWorkspaceExpiry(env, user.id, expiry);
+    const activeWorkspace = await env.DB.prepare('SELECT id FROM team_chats WHERE owner_user_id=? AND active=1 AND plan_expires_at>? LIMIT 1').bind(user.id, nowIso()).first();
+    if (!activeWorkspace) teamActivation = await issueTeamActivationCode(env, user.id);
+  }
   await reactToMessage(env, msg, '🎉');
-  await send(env, msg.chat.id, `🎉 <b>${cfg.label} activated</b>\n\n⭐ Payment: ${cfg.stars} Stars\n📅 Access until: ${esc(formatInTimezone(expiry, user.timezone_configured ? user.timezone : 'UTC'))}\n${p.is_recurring ? '🔁 Recurring subscription is active.' : ''}\n\nUse /plans anytime to view your plan.`);
+  await send(env, msg.chat.id, `🎉 <b>${cfg.label} activated</b>\n\n⭐ Payment: ${cfg.stars} Stars\n📅 Access until: ${esc(formatInTimezone(expiry, user.timezone_configured ? user.timezone : 'UTC'))}\n${p.is_recurring ? '🔁 Recurring subscription is active.' : ''}${teamActivation ? `\n\n🔑 <b>Your 24-hour Team activation code</b>\n<code>${teamActivation.code}</code>\n\nAdd this bot as an admin in your group/supergroup, then send this code there yourself. For a channel, use <code>/team_activate ${teamActivation.code} @channelusername</code> here in private.` : plan === 'team' ? '\n\n🏢 Your existing Team workspace expiry was extended automatically.' : ''}\n\nUse /plans anytime to view your plan.`);
 }
 async function applyReferral(env, user, code) {
   if (!code || user.referred_by) return false;
@@ -404,7 +552,7 @@ function adminMenuMarkup() {
 async function adminStatsText(env) {
   const [users, paid, blocked, verified, ads, broadcasts, revenue] = await Promise.all([
     env.DB.prepare('SELECT COUNT(*) c FROM users').first(),
-    env.DB.prepare("SELECT COUNT(*) c FROM users WHERE plan IN ('starter','pro') AND (plan_expires_at IS NULL OR plan_expires_at>?)").bind(nowIso()).first(),
+    env.DB.prepare("SELECT COUNT(*) c FROM users WHERE plan IN ('starter','pro','team') AND (plan_expires_at IS NULL OR plan_expires_at>?)").bind(nowIso()).first(),
     env.DB.prepare('SELECT COUNT(*) c FROM users WHERE blocked=1').first(),
     env.DB.prepare("SELECT COUNT(*) c FROM domain_verifications WHERE status='verified'").first(),
     env.DB.prepare('SELECT COUNT(*) c FROM ads WHERE active=1').first(),
@@ -430,6 +578,7 @@ async function adminUserDetail(env, dbUserId) {
     [{ text: u.blocked ? '✅ Unblock' : '🚫 Block', callback_data: `${u.blocked ? 'adminunblock' : 'adminblock'}:${u.id}` }],
     [{ text: '🆓 Set Free', callback_data: `adminsetfree:${u.id}` }],
     [{ text: '⭐ Set Starter', callback_data: `adminsetstarter:${u.id}` }, { text: '👑 Set Pro', callback_data: `adminsetpro:${u.id}` }],
+    [{ text: '🏢 Set Team', callback_data: `adminsetteam:${u.id}` }],
     [{ text: '🎁 Gift 50', callback_data: `admingift50:${u.id}` }, { text: '🎁 Gift 100', callback_data: `admingift100:${u.id}` }],
     [{ text: '🎁 Gift 250', callback_data: `admingift250:${u.id}` }, { text: '🪙 +100 Direct', callback_data: `admincoins100:${u.id}` }],
     [{ text: '⬅️ Users', callback_data: 'admin:users' }]
@@ -445,6 +594,24 @@ async function adminAdsText(env) {
   const lines = rows.results.length ? rows.results.map((a) => `• #${a.id} ${a.active ? '🟢' : '⚪'} ${esc(a.content_type)} • views ${a.impressions || 0} • ${esc(short(a.title || a.text_content || 'Ad', 40))}`).join('\n') : 'No ads.';
   return `📣 <b>Ads Manager</b>\n\n${lines}\n\nCreate: /admin_ad_create\nEdit content: /admin_ad_edit ID\nButtons: <code>/admin_ad_buttons ID Label|https://url; More|https://url</code>\nEnable/disable: /admin_ad_on ID • /admin_ad_off ID\nDelete: /admin_ad_delete ID\nGlobal: /admin_ads_on • /admin_ads_off\n\nMedia files are referenced by Telegram file_id only; WEB DOCTOR PRO does not store the image/video/voice bytes.`;
 }
+
+async function adminAdsView(env) {
+  const rows = await env.DB.prepare('SELECT * FROM ads ORDER BY id DESC LIMIT 12').all();
+  const globalOn = (await appMeta(env, 'ads_enabled')) !== '0';
+  const lines = rows.results.length ? rows.results.map((a) => `• #${a.id} ${a.active ? '🟢 ON' : '⚪ OFF'} • ${esc(a.content_type)} • views ${a.impressions || 0} • ${esc(short(a.title || a.text_content || 'Ad', 34))}`).join('\n') : 'No ads yet.';
+  const buttons = [
+    [{ text: globalOn ? '🟢 Global Ads ON · Turn OFF' : '⚪ Global Ads OFF · Turn ON', callback_data: `adminads:${globalOn ? 'off' : 'on'}` }],
+    [{ text: '➕ Create Ad', callback_data: 'admin:adcreate' }]
+  ];
+  for (const a of rows.results) buttons.push([
+    { text: `#${a.id} ${a.active ? '🟢 ON' : '⚪ OFF'}`, callback_data: `adminad:${a.active ? 'off' : 'on'}:${a.id}` },
+    { text: '✏️ Edit', callback_data: `adminad:edit:${a.id}` },
+    { text: '🗑 Delete', callback_data: `adminad:ask:${a.id}` }
+  ]);
+  buttons.push([{ text: '⬅️ Admin Home', callback_data: 'admin:home' }]);
+  return { text: `📣 <b>Ads Manager</b>\n\nGlobal: <b>${globalOn ? 'ON' : 'OFF'}</b>\n\n${lines}\n\nTap buttons below to control ads. Editing asks you to send replacement text/image/video/voice.`, markup: { inline_keyboard: buttons } };
+}
+
 async function adminBroadcastsText(env) {
   const rows = await env.DB.prepare('SELECT * FROM broadcasts ORDER BY id DESC LIMIT 15').all();
   const lines = rows.results.length ? rows.results.map((b) => `• #${b.id} ${esc(b.status)} • sent ${b.sent_count || 0} • failed ${b.failed_count || 0} • ${esc(b.content_type)}`).join('\n') : 'No broadcasts.';
@@ -550,6 +717,8 @@ async function syncBotProfile(env) {
       { command: 'schedule', description: '🗓 Schedule signed PDF reports' },
       { command: 'google', description: '🔗 Connect your Google account data' },
       { command: 'plans', description: '💎 Plans & Telegram Stars' },
+      { command: 'team', description: '🏢 Team workspace & activation' },
+      { command: 'team_code', description: '🔑 New Team activation code' },
       { command: 'invite', description: '🎁 Invite friends & earn coins' },
       { command: 'coins', description: '🪙 Coins & plan rewards' },
       { command: 'coupon', description: '🎟 Redeem a coupon' },
@@ -1076,7 +1245,7 @@ async function setTimezone(env, userId, tz) {
 }
 function welcome(firstName = '') {
   const hi = firstName ? `Hi ${esc(firstName)}! 👋` : 'Welcome! 👋';
-  return `🩺 <b>WEB DOCTOR PRO</b>\n<b>Your Website Doctor.</b>\n\n${hi}\n\n🌐 Check website health\n⏱ Monitor uptime\n📅 Track domain expiry\n🔐 Watch certificate expiry\n📈 Audit SEO / GEO / AEO\n📑 Get signed PDF reports\n\n<b>Fastest way</b>\nSend a domain directly:\n<code>example.com</code>\n\n<b>Monitor your website</b>\n<code>/add example.com</code>\nA one-time DNS TXT verification protects ownership-sensitive monitoring.\n\n💎 Use /plans for Free, Starter and Pro.\n🎁 Use /invite to earn coins.\n\nUse /help for all commands.`;
+  return `🩺 <b>WEB DOCTOR PRO</b>\n<b>Your Website Doctor.</b>\n\n${hi}\n\n🌐 Check website health\n⏱ Monitor uptime\n📅 Track domain expiry\n🔐 Watch certificate expiry\n📈 Audit SEO / GEO / AEO\n📑 Get signed PDF reports\n\n<b>Fastest way</b>\nSend a domain directly:\n<code>example.com</code>\n\n<b>Monitor your website</b>\n<code>/add example.com</code>\nA one-time DNS TXT verification protects ownership-sensitive monitoring.\n\n💎 Use /plans for Free, Starter, Pro and Team.\n🏢 Team plan can activate one shared group/channel workspace.\n🎁 Use /invite to earn coins.\n\nUse /help for all commands.`;
 }
 async function statusText(env, user) {
   const [count, conn, usage, coins] = await Promise.all([
@@ -1120,6 +1289,7 @@ async function handleAdd(env, chatId, user, domain) {
   return send(env, chatId, `🛡 <b>Verify website ownership</b>\n\n🌐 <b>${esc(domain)}</b>\n\nAdd this DNS TXT record at your DNS provider:\n\n<b>Type</b>\n<code>TXT</code>\n\n<b>Name / Host</b>\n<code>${esc(x.record_name)}</code>\n\n<b>Value</b>\n<code>${esc(x.token)}</code>\n\n⏳ <b>Valid for:</b> 24 hours\n\nAfter saving the record, tap <b>Verify DNS Now</b>. Once verified, monitoring activates and WEB DOCTOR PRO prepares the first signed PDF report if your daily report allowance is available.`, { reply_markup: verifyButtons(domain) });
 }
 async function handleVerify(env, chatId, user, domain) {
+  if (await isVerified(env, user.id, domain)) return send(env, chatId, `✅ <b>Ownership already verified</b>\n\n🌐 ${esc(domain)}\n🛡 No DNS verification is needed again. You can safely remove the old TXT record.`, { reply_markup: scheduleButtons(domain) });
   const msg = await startProgress(env, chatId, `Verifying ${domain}`, 'Looking for the unique DNS TXT record…');
   const x = await verifyOwnership(env, user, domain);
   if (!x.ok) return edit(env, chatId, msg.message_id, `⏳ <b>Verification not complete yet</b>\n\n🌐 ${esc(domain)}\n${esc(x.reason)}\n\nKeep the TXT record in DNS and try again.`, { reply_markup: verifyButtons(domain) });
@@ -1176,11 +1346,12 @@ async function handleAdminCommand(env, msg, user, cmd, args) {
     return void await send(env, chatId, `✅ Granted ${PLAN_CONFIG[plan].label} for ${days} day(s).`);
   }
   if (cmd === '/admin_plan') {
-    if (!args[0] || !['free','starter','pro'].includes(String(args[1] || '').toLowerCase())) return void await send(env, chatId, 'Usage: <code>/admin_plan TELEGRAM_ID free|starter|pro [DAYS]</code>');
+    if (!args[0] || !['free','starter','pro','team'].includes(String(args[1] || '').toLowerCase())) return void await send(env, chatId, 'Usage: <code>/admin_plan TELEGRAM_ID free|starter|pro [DAYS]</code>');
     const target = await adminByTelegramId(env, args[0]); if (!target) return void await send(env, chatId, '❌ User not found.');
     const plan = String(args[1]).toLowerCase(), days = /^\d+$/.test(String(args[2] || '')) ? Number(args[2]) : 30;
     const expiry = await adminSetExactPlan(env, target, plan, days);
-    await send(env, target.chat_id, `🛠 <b>Your plan was updated by admin</b>\n\n💎 Plan: <b>${PLAN_CONFIG[plan].label}</b>${expiry ? `\n⏳ Until: ${esc(formatInTimezone(expiry, target.timezone_configured ? target.timezone : 'UTC'))}` : ''}`).catch(() => {});
+    const teamActivation = plan === 'team' ? await issueTeamActivationCode(env, target.id) : null;
+    await send(env, target.chat_id, `🛠 <b>Your plan was updated by admin</b>\n\n💎 Plan: <b>${PLAN_CONFIG[plan].label}</b>${expiry ? `\n⏳ Until: ${esc(formatInTimezone(expiry, target.timezone_configured ? target.timezone : 'UTC'))}` : ''}${teamActivation ? `\n\n🔑 Team activation code (24h)\n<code>${teamActivation.code}</code>` : ''}`).catch(() => {});
     return void await send(env, chatId, `✅ User plan set to <b>${PLAN_CONFIG[plan].label}</b>.`);
   }
   if (cmd === '/admin_gift') {
@@ -1228,7 +1399,7 @@ async function handleAdminCommand(env, msg, user, cmd, args) {
     const code = String(args[0] || '').toUpperCase(); if (!code) return void await send(env, chatId, 'Usage: <code>/admin_coupon_delete CODE</code>');
     const r = await env.DB.prepare('DELETE FROM coupons WHERE code=?').bind(code).run(); return void await send(env, chatId, r.meta.changes ? '✅ Coupon deleted.' : 'ℹ️ Coupon not found.');
   }
-  if (cmd === '/admin_ads') return void await send(env, chatId, await adminAdsText(env), { reply_markup: adminMenuMarkup() });
+  if (cmd === '/admin_ads') { const v = await adminAdsView(env); return void await send(env, chatId, v.text, { reply_markup: v.markup }); }
   if (cmd === '/admin_ad_create') {
     await setAdminSession(env, user.id, 'ad_create'); return void await send(env, chatId, '➕ <b>Create Ad</b>\n\nSend the ad now as text, image, video, or voice.\nThe media bytes stay on Telegram; only Telegram file_id is saved.');
   }
@@ -1289,7 +1460,7 @@ async function handleCommand(env, msg, user) {
     return;
   }
   if (cmd === '/about') return void await send(env, chatId, `🩺 <b>WEB DOCTOR PRO</b>\n<b>Your Website Doctor.</b>\n\nMonitor uptime, domain and certificate expiry, audit SEO/GEO/AEO, verify website ownership, and receive signed PDF reports and automatic Telegram alerts.\n\n📦 v${VERSION}\n👨‍💻 Developer: ${DEVELOPER}\n🔗 ${GITHUB_URL}`);
-  if (cmd === '/help') return void await send(env, chatId, `${welcome(user.first_name)}\n\n<b>Commands</b>\n/check example.com — quick check\n/scan example.com — full scan + signed PDF\n/seo example.com — SEO/GEO/AEO\n/performance example.com — PageSpeed\n/ssl example.com — certificate expiry\n/provider example.com — hosting/DNS/registrar\n/links example.com — broken links\n/robots example.com — robots/sitemap/llms.txt\n/keywords example.com — keyword opportunities\n/add example.com — verify + monitor\n/verify example.com — re-check DNS TXT\n/schedule example.com weekly — scheduled reports\n/google — connect your own Google account data\n/plans — plans & Stars\n/invite — referral link\n/coins — coin balance/rewards\n/coupon CODE — redeem coupon\n/list — monitored sites\n/remove example.com — stop monitoring\n/status — bot status\n/settings — settings & usage`);
+  if (cmd === '/help') return void await send(env, chatId, `${welcome(user.first_name)}\n\n<b>Commands</b>\n/check example.com — quick check\n/scan example.com — full scan + signed PDF\n/seo example.com — SEO/GEO/AEO\n/performance example.com — PageSpeed\n/ssl example.com — certificate expiry\n/provider example.com — hosting/DNS/registrar\n/links example.com — broken links\n/robots example.com — robots/sitemap/llms.txt\n/keywords example.com — keyword opportunities\n/add example.com — verify + monitor\n/verify example.com — re-check DNS TXT\n/schedule example.com weekly — scheduled reports\n/google — connect your own Google account data\n/plans — plans & Stars\n/team — Team workspace status\n/team_code — new 24-hour Team activation code\n/team_activate CODE @channel — activate a channel\n/invite — referral link\n/coins — coin balance/rewards\n/coupon CODE — redeem coupon\n/list — monitored sites\n/remove example.com — stop monitoring\n/status — bot status\n/settings — settings & usage`);
   if (cmd === '/timezone') {
     const tz = args.join(' '); if (!tz) return void await requireTimezone(env, chatId, user);
     if (!(await setTimezone(env, user.id, tz))) return void await send(env, chatId, '❌ Invalid timezone. Example: <code>/timezone Asia/Kolkata</code>');
@@ -1300,8 +1471,22 @@ async function handleCommand(env, msg, user) {
   if (cmd === '/settings') return void await send(env, chatId, await settingsText(env, user));
   if (cmd === '/plans' || cmd === '/plan') return void await send(env, chatId, plansText(user), { reply_markup: plansMarkup() });
   if (cmd === '/subscribe') {
-    const plan = String(args[0] || '').toLowerCase(); if (!['starter','pro'].includes(plan)) return void await send(env, chatId, 'Usage: <code>/subscribe starter</code> or <code>/subscribe pro</code>', { reply_markup: plansMarkup() });
+    const plan = String(args[0] || '').toLowerCase(); if (!['starter','pro','team'].includes(plan)) return void await send(env, chatId, 'Usage: <code>/subscribe starter</code>, <code>/subscribe pro</code> or <code>/subscribe team</code>', { reply_markup: plansMarkup() });
     return void await sendPlanInvoice(env, chatId, user, plan);
+  }
+  if (cmd === '/team' || cmd === '/team_status') { const v = await teamAccountView(env, user); return void await send(env, chatId, v.text, { reply_markup: v.markup }); }
+  if (cmd === '/team_code') {
+    if (activePlan(user) !== 'team') return void await send(env, chatId, '🔒 Team plan required. Use /plans.', { reply_markup: plansMarkup() });
+    const x = await issueTeamActivationCode(env, user.id);
+    return void await send(env, chatId, `🔑 <b>New Team activation code</b>\n\n<code>${x.code}</code>\n\nValid for 24 hours (or until your Team plan expires). Add the bot as admin in the target group/supergroup and send this code there yourself.`);
+  }
+  if (cmd === '/team_activate') {
+    const code = String(args[0] || '').toUpperCase(), target = args[1];
+    if (!/^WDP-TEAM-[A-F0-9]{10}$/.test(code)) return void await send(env, chatId, 'Usage: <code>/team_activate WDP-TEAM-CODE @channelusername</code>\n\nFor groups, simply send the code inside the group after making this bot an admin.');
+    if (!target) return void await send(env, chatId, '🏢 <b>Group activation</b>\nMake this bot an admin and send the code directly in that group.\n\n📣 <b>Channel activation</b>\nUse <code>/team_activate CODE @channelusername</code> after making this bot a channel admin.');
+    let targetChat; try { targetChat = await tg(env, 'getChat', { chat_id: /^-?\d+$/.test(target) ? Number(target) : target }); } catch { return void await send(env, chatId, '❌ I cannot access that target chat. Add this bot there as an admin first and check the username/ID.'); }
+    const result = await activateTeamWorkspace(env, targetChat, user, code);
+    return void await send(env, chatId, result.ok ? `🎉 <b>Team workspace activated</b>\n\n🏢 ${esc(result.workspaceTitle)}\n📅 Until: ${esc(formatInTimezone(result.expiry, user.timezone_configured ? user.timezone : 'UTC'))}` : `❌ <b>Team activation failed</b>\n\n${esc(result.reason)}`);
   }
   if (cmd === '/gift') return void await sendPendingGiftBox(env, user, chatId, { force: true });
   if (cmd === '/invite') return void await send(env, chatId, await referralText(env, user));
@@ -1380,17 +1565,30 @@ async function handleCommand(env, msg, user) {
 
 async function handleCallback(env, q) {
   if (!q?.from || !q?.message) return;
-  const user = await upsertUser(env, q.from, q.message.chat.id), data = String(q.data || '');
+  const data = String(q.data || ''), sharedChat = q.message.chat.type !== 'private';
+  let user, teamAccess = null;
+  if (sharedChat) {
+    teamAccess = await teamAccessForChat(env, q.message.chat.id);
+    if (!teamAccess) { await answerCb(env, q.id, 'Team plan is not active in this chat.'); return; }
+    user = teamAccess.owner;
+  } else user = await upsertUser(env, q.from, q.message.chat.id);
   if (user.blocked) { await answerCb(env, q.id, 'Account access unavailable.'); return; }
+  if (sharedChat && (data.startsWith('tz:') || data.startsWith('buyplan:') || data.startsWith('redeem:') || data === 'couponhelp:show' || data.startsWith('giftopen:') || data.startsWith('teamcode:') || data.startsWith('admin'))) { await answerCb(env, q.id, 'Open WEB DOCTOR PRO privately for this action.'); return; }
   if (data.startsWith('tz:')) {
     const tz = data.slice(3); if (await setTimezone(env, user.id, tz)) { await answerCb(env, q.id, `Timezone: ${tz}`); return send(env, q.message.chat.id, `✅ <b>Timezone set</b>\n\n🕒 ${esc(formatInTimezone(nowIso(), tz))}`); }
   }
   if (data.startsWith('buyplan:')) {
     const plan = data.slice('buyplan:'.length);
-    if (!['starter','pro'].includes(plan)) return answerCb(env, q.id, 'Invalid plan.');
+    if (!['starter','pro','team'].includes(plan)) return answerCb(env, q.id, 'Invalid plan.');
     await answerCb(env, q.id, 'Opening Telegram Stars checkout…');
     try { return await sendPlanInvoice(env, q.message.chat.id, user, plan); }
     catch { return send(env, q.message.chat.id, '⚠️ <b>Stars checkout could not open</b>\n\nPlease try again with <code>/subscribe ' + esc(plan) + '</code>.'); }
+  }
+  if (data === 'team:plans') { await answerCb(env, q.id, 'Plans'); return send(env, q.message.chat.id, plansText(user), { reply_markup: plansMarkup() }); }
+  if (data === 'teamcode:new') {
+    if (activePlan(user) !== 'team') return answerCb(env, q.id, 'Team plan required.');
+    const x = await issueTeamActivationCode(env, user.id); await answerCb(env, q.id, 'New Team code created.');
+    return send(env, q.message.chat.id, `🔑 <b>New 24-hour Team activation code</b>\n\n<code>${x.code}</code>\n\nOnly you can activate it. Make the bot admin in the target group and send this code there.`);
   }
   if (data.startsWith('redeem:')) { await answerCb(env, q.id, 'Redeeming coins…'); return redeemCoins(env, q.message.chat.id, user, data.slice(7)); }
   if (data === 'couponhelp:show') { await answerCb(env, q.id, 'Coupon'); return send(env, q.message.chat.id, '🎟 Redeem a coupon with:\n<code>/coupon YOURCODE</code>'); }
@@ -1406,19 +1604,33 @@ async function handleCallback(env, q) {
     if (data === 'admin:home' || data === 'admin:stats') return send(env, q.message.chat.id, await adminStatsText(env), { reply_markup: adminMenuMarkup() });
     if (data === 'admin:users') { const v = await adminUsersView(env); return send(env, q.message.chat.id, v.text, { reply_markup: v.markup }); }
     if (data === 'admin:coupons') return send(env, q.message.chat.id, await adminCouponsText(env), { reply_markup: adminMenuMarkup() });
-    if (data === 'admin:ads') return send(env, q.message.chat.id, await adminAdsText(env), { reply_markup: adminMenuMarkup() });
+    if (data === 'admin:ads') { const v = await adminAdsView(env); return edit(env, q.message.chat.id, q.message.message_id, v.text, { reply_markup: v.markup }); }
+    if (data.startsWith('adminads:')) {
+      const turnOn = data.endsWith(':on'); await setAppMeta(env, 'ads_enabled', turnOn ? '1' : '0');
+      const v = await adminAdsView(env); return edit(env, q.message.chat.id, q.message.message_id, v.text, { reply_markup: v.markup });
+    }
+    if (data.startsWith('adminad:')) {
+      const [, action, idRaw] = data.split(':'), adId = Number(idRaw);
+      if (!adId) return answerCb(env, q.id, 'Invalid ad.');
+      if (action === 'ask') return edit(env, q.message.chat.id, q.message.message_id, `🗑 <b>Delete ad #${adId}?</b>\n\nThis permanently removes the ad record.`, { reply_markup: { inline_keyboard: [[{ text: '🗑 Yes, Delete', callback_data: `adminad:delete:${adId}` }, { text: 'Cancel', callback_data: 'admin:ads' }]] } });
+      if (action === 'delete') await env.DB.prepare('DELETE FROM ads WHERE id=?').bind(adId).run();
+      if (action === 'on' || action === 'off') await env.DB.prepare('UPDATE ads SET active=?,updated_at=? WHERE id=?').bind(action === 'on' ? 1 : 0, nowIso(), adId).run();
+      if (action === 'edit') { const ad = await env.DB.prepare('SELECT id FROM ads WHERE id=?').bind(adId).first(); if (!ad) return send(env,q.message.chat.id,'❌ Ad not found.'); await setAdminSession(env,user.id,'ad_edit',{id:adId}); return send(env,q.message.chat.id,`✏️ Send replacement content for ad #${adId} as text, image, video, or voice.`); }
+      const v = await adminAdsView(env); return edit(env, q.message.chat.id, q.message.message_id, v.text, { reply_markup: v.markup });
+    }
     if (data === 'admin:broadcasts') return send(env, q.message.chat.id, await adminBroadcastsText(env), { reply_markup: adminMenuMarkup() });
     if (data === 'admin:plans') return send(env, q.message.chat.id, plansText(user), { reply_markup: adminMenuMarkup() });
     if (data === 'admin:adcreate') { await setAdminSession(env,user.id,'ad_create'); return send(env,q.message.chat.id,'➕ <b>Create Ad</b>\n\nSend text, image, video, or voice now.'); }
     if (data === 'admin:broadcastcreate') { await setAdminSession(env,user.id,'broadcast_create'); return send(env,q.message.chat.id,'📢 <b>Create Broadcast</b>\n\nSend text, image, video, or voice now.'); }
     if (data.startsWith('adminuser:')) { const v=await adminUserDetail(env,Number(data.split(':')[1])); return send(env,q.message.chat.id,v.text,{reply_markup:v.markup}); }
     const id = Number(data.split(':')[1]);
-    if (data.startsWith('adminsetfree:') || data.startsWith('adminsetstarter:') || data.startsWith('adminsetpro:')) {
-      const plan = data.startsWith('adminsetfree:') ? 'free' : data.startsWith('adminsetpro:') ? 'pro' : 'starter';
+    if (data.startsWith('adminsetfree:') || data.startsWith('adminsetstarter:') || data.startsWith('adminsetpro:') || data.startsWith('adminsetteam:')) {
+      const plan = data.startsWith('adminsetfree:') ? 'free' : data.startsWith('adminsetteam:') ? 'team' : data.startsWith('adminsetpro:') ? 'pro' : 'starter';
       const target = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
       if (!target) return send(env, q.message.chat.id, '❌ User not found.');
       const expiry = await adminSetExactPlan(env, target, plan, 30);
-      await send(env, target.chat_id, `🛠 <b>Your plan was updated by admin</b>\n\n💎 Plan: <b>${PLAN_CONFIG[plan].label}</b>${expiry ? `\n⏳ Until: ${esc(formatInTimezone(expiry, target.timezone_configured ? target.timezone : 'UTC'))}` : ''}`).catch(() => {});
+      const teamActivation = plan === 'team' ? await issueTeamActivationCode(env, target.id) : null;
+      await send(env, target.chat_id, `🛠 <b>Your plan was updated by admin</b>\n\n💎 Plan: <b>${PLAN_CONFIG[plan].label}</b>${expiry ? `\n⏳ Until: ${esc(formatInTimezone(expiry, target.timezone_configured ? target.timezone : 'UTC'))}` : ''}${teamActivation ? `\n\n🔑 Team activation code (24h)\n<code>${teamActivation.code}</code>` : ''}`).catch(() => {});
       const v = await adminUserDetail(env, id); return send(env, q.message.chat.id, v.text, { reply_markup: v.markup });
     }
     if (/^admingift(50|100|250):/.test(data)) {
@@ -1457,7 +1669,9 @@ async function handleTelegram(env, update) {
   await syncBotProfile(env);
   if (update.pre_checkout_query) return handlePreCheckout(env, update.pre_checkout_query);
   if (update.callback_query) return handleCallback(env, update.callback_query);
-  const msg = update.message; if (!msg?.from || !msg?.chat) return;
+  const msg = update.message || update.channel_post; if (!msg?.chat) return;
+  if (msg.chat.type !== 'private') return handleTeamChatUpdate(env, msg);
+  if (!msg.from) return;
   let user = await upsertUser(env, msg.from, msg.chat.id);
   if (user.blocked) { await reactToMessage(env,msg,'🚫'); return send(env,msg.chat.id,'🚫 <b>Account access unavailable</b>\n\nPlease contact support if you believe this is a mistake.'); }
   await sendPendingGiftBox(env, user, msg.chat.id).catch(() => false);
