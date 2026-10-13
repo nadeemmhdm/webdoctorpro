@@ -300,6 +300,20 @@ export function buildReportPdf(report) {
   kv('Certificate expiry', report.sslExpiryLocal || 'Not available');
   kv('Certificate issuer', report.sslIssuer || 'Not available');
 
+  if (report.health) {
+    h2('WEB DOCTOR Health Score');
+    kv('Overall score', `${report.health.healthScore}/100`);
+    kv('Domain', `${report.health.domainScore}/100`);
+    kv('SSL', `${report.health.sslScore}/100`);
+    kv('Security', `${report.health.securityScore}/100`);
+    kv('SEO', `${report.health.seoScore}/100`);
+    kv('Performance', `${report.health.performanceScore}/100`);
+    kv('DNS', `${report.health.dnsScore}/100`);
+    kv('Availability', `${report.health.availabilityScore}/100`);
+    if (report.availability) kv('Measured uptime', `${Number(report.availability.uptime || 0).toFixed(2)}%`);
+    (report.topFixes || []).slice(0,3).forEach((x,i) => p(`${i+1}. [${String(x.severity||'info').toUpperCase()}] ${x.text}`));
+  }
+
   h2('SEO Findings');
   kv('Title', report.seo?.title || 'Missing');
   kv('Meta description', report.seo?.description || 'Missing');

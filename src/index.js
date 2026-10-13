@@ -4,11 +4,11 @@ import {
   parseCertSpotter, fallbackKeywords, normalizeTxtRecord, parsePageSpeed, scheduleIntervalMs, buildReportPdf
 } from './lib.js';
 
-const VERSION = '1.4.1';
+const VERSION = '1.5.0';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
-const LAST_UPDATED_AT = '2026-10-13T07:18:00+05:30';
+const LAST_UPDATED_AT = '2026-10-13T08:20:00+05:30';
 const ALERT_DAYS = [30, 14, 7, 3, 1, 0];
 const TELEGRAM_API = 'https://api.telegram.org';
 const MAX_HTML_BYTES = 700_000;
@@ -35,6 +35,9 @@ const REFERRAL_REFERRER_COINS = 25;
 const REFERRAL_NEW_USER_COINS = 10;
 const AD_VISIBLE_MS = 60000;
 const BROADCAST_BATCH = 20;
+const CHANGE_CHECK_INTERVAL_MS = 15 * 60000;
+const UPTIME_CONFIRM_FAILURES = 2;
+const MONITOR_RETENTION_DAYS = 90;
 
 function planRank(plan) { return plan === 'team' ? 3 : plan === 'pro' ? 2 : plan === 'starter' ? 1 : 0; }
 function activePlan(user) {
@@ -341,8 +344,9 @@ async function handleTeamChatUpdate(env, msg) {
   if (!text) return;
   const [rawCmd, ...args] = text.split(/\s+/), cmd = rawCmd.toLowerCase().split('@')[0];
   if (cmd === '/team' || cmd === '/team_status' || cmd === '/status') return send(env, chatId, await teamWorkspaceStatusText(env, access));
-  if (cmd === '/help') return send(env, chatId, '🏢 <b>Team commands</b>\n\n/check domain\n/scan domain\n/seo domain\n/performance domain\n/ssl domain\n/provider domain\n/links domain\n/robots domain\n/keywords domain\n/add domain\n/verify domain\n/schedule domain weekly\n/list\n/remove domain\n/team_status\n\nTeam usage, verified sites and limits are shared through the purchaser account.');
+  if (cmd === '/help') return send(env, chatId, '🏢 <b>Team commands</b>\n\n/check domain\n/scan domain\n/seo domain\n/performance domain\n/ssl domain\n/provider domain\n/links domain\n/robots domain\n/keywords domain\n/add domain\n/verify domain\n/schedule domain weekly\n/score domain\n/compare domain\n/fix domain\n/emergency domain\n/list\n/remove domain\n/team_status\n\nTeam usage, verified sites and limits are shared through the purchaser account.');
   if (cmd === '/plans') return send(env, chatId, plansText(access.owner));
+  if (['/score','/compare','/fix','/emergency'].includes(cmd)) { if(!args[0]) return send(env,chatId,`💡 Usage: <code>${cmd} example.com</code>`); let domain; try{domain=normalizeDomain(args[0]);}catch{return send(env,chatId,'❌ Invalid domain.');} if(cmd==='/score') return send(env,chatId,await healthScoreText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); if(cmd==='/compare') return send(env,chatId,await compareText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); if(cmd==='/fix') return send(env,chatId,await fixesText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); return send(env,chatId,await emergencyDoctor(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); }
   const toolMap = { '/check':'check','/scan':'scan','/seo':'seo','/performance':'performance','/ssl':'ssl','/provider':'provider','/links':'links','/robots':'robots','/keywords':'keywords' };
   if (toolMap[cmd]) {
     if (!args[0]) return send(env, chatId, '💡 Add a domain after the command. Example: <code>/check example.com</code>');
@@ -375,6 +379,308 @@ async function handleTeamChatUpdate(env, msg) {
     let domain; try { domain = normalizeDomain(text); } catch { return; }
     return runTool(env, chatId, access.owner, 'check', domain);
   }
+}
+
+
+function clamp100(v) { return Math.max(0, Math.min(100, Math.round(Number(v) || 0))); }
+function expiryScore(iso) {
+  const d = daysUntil(iso);
+  if (d === null) return 50;
+  if (d <= 0) return 0;
+  if (d <= 3) return 20;
+  if (d <= 7) return 40;
+  if (d <= 30) return 70;
+  if (d <= 90) return 90;
+  return 100;
+}
+function safeJson(value, fallback = null) { try { return JSON.parse(value); } catch { return fallback; } }
+function stableValues(values = []) { return [...new Set((values || []).map((x) => String(x).trim()).filter(Boolean))].sort(); }
+async function sha256Text(value) {
+  const bytes = new TextEncoder().encode(String(value ?? ''));
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+async function watchForDomain(env, userId, domain) {
+  return env.DB.prepare(`SELECT w.*,d.expires_at,d.ssl_expires_at,d.registrar,d.hosting_provider,d.dns_provider FROM watches w JOIN domains d ON d.id=w.domain_id WHERE w.user_id=? AND d.name=? AND w.active=1`).bind(userId, domain).first();
+}
+async function availabilityStats(env, watchId, days = 30) {
+  if (!watchId) return { score: 100, uptime: 100, samples: 0, incidents: 0 };
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  const [samples, incidents] = await Promise.all([
+    env.DB.prepare(`SELECT COUNT(*) total,SUM(CASE WHEN state='up' THEN 1 ELSE 0 END) up_count FROM uptime_samples WHERE watch_id=? AND checked_at>=?`).bind(watchId, since).first(),
+    env.DB.prepare(`SELECT COUNT(*) count FROM uptime_incidents WHERE watch_id=? AND started_at>=?`).bind(watchId, since).first()
+  ]);
+  const total = Number(samples?.total || 0), up = Number(samples?.up_count || 0);
+  const uptime = total ? Math.max(0, Math.min(100, up * 100 / total)) : 100;
+  return { score: clamp100(uptime), uptime, samples: total, incidents: Number(incidents?.count || 0) };
+}
+function securityHealthScore(report) {
+  const h = Object.fromEntries(Object.entries(report?.snap?.page?.headers || {}).map(([k,v]) => [String(k).toLowerCase(), String(v)]));
+  let score = 30;
+  if (String(report?.snap?.page?.url || '').startsWith('https://')) score += 25;
+  if (h['strict-transport-security']) score += 15;
+  if (h['content-security-policy']) score += 10;
+  if (h['x-content-type-options']) score += 8;
+  if (h['referrer-policy']) score += 6;
+  if (h['permissions-policy']) score += 6;
+  return clamp100(score);
+}
+function dnsHealthScore(report) {
+  const ns = report?.snap?.nsRecords || [];
+  const a = report?.dnsHealth?.a || [];
+  const aaaa = report?.dnsHealth?.aaaa || [];
+  const mx = report?.dnsHealth?.mx || [];
+  let score = 0;
+  if (ns.length) score += 35;
+  if (a.length || aaaa.length) score += 45;
+  if (mx.length) score += 20;
+  return clamp100(score);
+}
+function buildTopFixes(report, metrics) {
+  const fixes = [];
+  const add = (severity, text) => { if (text && !fixes.some((x) => x.text === text)) fixes.push({ severity, text }); };
+  const sslDays = daysUntil(report?.ssl?.expiresAt), domainDays = daysUntil(report?.rdap?.expiresAt);
+  if (sslDays !== null && sslDays <= 7) add('high', `Renew the TLS certificate — ${sslDays <= 0 ? 'expired' : `${sslDays} day(s) remaining`}.`);
+  if (domainDays !== null && domainDays <= 30) add('high', `Renew the domain early — ${domainDays <= 0 ? 'expired' : `${domainDays} day(s) remaining`}.`);
+  if ((report?.pageSpeed?.performance ?? 100) < 70) add('medium', `Improve mobile performance — current score ${report.pageSpeed.performance}/100.`);
+  if ((report?.links?.broken?.length || 0) > 0) add('medium', `Fix ${report.links.broken.length} broken/problem internal link(s).`);
+  if (!report?.robots?.exists) add('medium', 'Add a valid robots.txt file.');
+  if (!report?.sitemap?.exists) add('medium', 'Publish and reference an XML sitemap.');
+  const highSeo = (report?.seo?.issues || []).find((x) => x.severity === 'high');
+  if (highSeo) add('high', highSeo.issue);
+  if ((metrics?.securityScore || 100) < 70) add('medium', 'Strengthen HTTP security headers such as HSTS and Content-Security-Policy.');
+  if ((metrics?.availabilityScore || 100) < 99) add('high', `Investigate recent availability; measured uptime is ${Number(report?.availability?.uptime || 0).toFixed(2)}%.`);
+  if (!fixes.length) add('low', 'No critical issue detected. Keep monitoring and review performance/SEO trends regularly.');
+  const rank = { high: 0, medium: 1, low: 2 };
+  return fixes.sort((a,b) => rank[a.severity] - rank[b.severity]).slice(0, 3);
+}
+function comparisonArrow(oldValue, newValue, lowerIsBetter = false) {
+  oldValue = Number(oldValue); newValue = Number(newValue);
+  if (!Number.isFinite(oldValue) || !Number.isFinite(newValue) || oldValue === newValue) return '→';
+  const better = lowerIsBetter ? newValue < oldValue : newValue > oldValue;
+  return better ? '↑' : '↓';
+}
+async function enrichHealthReport(env, user, report) {
+  const watch = await watchForDomain(env, user.id, report.domain);
+  const [a, aaaa, mx, availability, previous] = await Promise.all([
+    dnsLookup(report.domain, 'A'), dnsLookup(report.domain, 'AAAA'), dnsLookup(report.domain, 'MX'),
+    availabilityStats(env, watch?.id, 30),
+    env.DB.prepare(`SELECT * FROM scan_history WHERE user_id=? AND domain=? ORDER BY scanned_at DESC LIMIT 1`).bind(user.id, report.domain).first()
+  ]);
+  report.dnsHealth = { a: stableValues(a), aaaa: stableValues(aaaa), mx: stableValues(mx) };
+  report.availability = availability;
+  const metrics = {
+    domainScore: expiryScore(report?.rdap?.expiresAt),
+    sslScore: expiryScore(report?.ssl?.expiresAt),
+    securityScore: securityHealthScore(report),
+    seoScore: clamp100(report?.seo?.score ?? 50),
+    performanceScore: clamp100(report?.pageSpeed?.performance ?? 50),
+    dnsScore: 0,
+    availabilityScore: availability.score
+  };
+  metrics.dnsScore = dnsHealthScore(report);
+  metrics.healthScore = clamp100(metrics.domainScore * .10 + metrics.sslScore * .15 + metrics.securityScore * .15 + metrics.seoScore * .20 + metrics.performanceScore * .20 + metrics.dnsScore * .10 + metrics.availabilityScore * .10);
+  const fixes = buildTopFixes(report, metrics);
+  report.health = metrics;
+  report.topFixes = fixes;
+  report.previousScan = previous || null;
+  report.comparison = previous ? {
+    performance: [Number(previous.performance_score), metrics.performanceScore],
+    seo: [Number(previous.seo_score), metrics.seoScore],
+    brokenLinks: [Number(previous.broken_links), Number(report?.links?.broken?.length || 0)],
+    health: [Number(previous.health_score), metrics.healthScore],
+    availability: [Number(previous.availability_score), metrics.availabilityScore],
+    loadMs: [previous.load_ms == null ? null : Number(previous.load_ms), report?.pageSpeed?.lcpMs == null ? null : Number(report.pageSpeed.lcpMs)]
+  } : null;
+  const metricsJson = JSON.stringify({ ...metrics, sslExpiry: report?.ssl?.expiresAt || null, domainExpiry: report?.rdap?.expiresAt || null });
+  await env.DB.prepare(`INSERT INTO scan_history(watch_id,user_id,domain,scanned_at,health_score,domain_score,ssl_score,security_score,seo_score,performance_score,dns_score,availability_score,broken_links,load_ms,fixes_json,metrics_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(watch?.id || null,user.id,report.domain,nowIso(),metrics.healthScore,metrics.domainScore,metrics.sslScore,metrics.securityScore,metrics.seoScore,metrics.performanceScore,metrics.dnsScore,metrics.availabilityScore,Number(report?.links?.broken?.length || 0),report?.pageSpeed?.lcpMs ?? null,JSON.stringify(fixes),metricsJson).run();
+  if (watch?.id) await env.DB.prepare('UPDATE watches SET last_health_score=?,last_health_at=?,updated_at=? WHERE id=?').bind(metrics.healthScore,nowIso(),nowIso(),watch.id).run();
+  return report;
+}
+function healthActionButtons(domain) {
+  return { inline_keyboard: [
+    [{ text: '❤️ Health Score', callback_data: `score:${domain}` }, { text: '📈 Compare', callback_data: `compare:${domain}` }],
+    [{ text: '🧠 What Should I Fix?', callback_data: `fix:${domain}` }, { text: '🆘 Emergency Doctor', callback_data: `emergency:${domain}` }],
+    [{ text: '🔄 Recheck', callback_data: `scan:${domain}` }, { text: '🗓 Report Schedule', callback_data: `schedule_weekly:${domain}` }]
+  ] };
+}
+async function latestScanHistory(env, userId, domain, limit = 2) {
+  const r = await env.DB.prepare(`SELECT * FROM scan_history WHERE user_id=? AND domain=? ORDER BY scanned_at DESC LIMIT ?`).bind(userId,domain,limit).all();
+  return r.results || [];
+}
+async function healthScoreText(env, user, domain) {
+  const rows = await latestScanHistory(env,user.id,domain,1);
+  if (!rows.length) return `❤️ <b>No health score yet</b>\n\n🌐 ${esc(domain)}\nRun <code>/scan ${esc(domain)}</code> first.`;
+  const x=rows[0];
+  return `❤️ <b>WEB DOCTOR SCORE: ${x.health_score}/100 ${x.health_score>=85?'🟢':x.health_score>=70?'🟡':x.health_score>=50?'🟠':'🔴'}</b>\n\n🌐 <b>${esc(domain)}</b>\n📅 Domain — ${x.domain_score}/100\n🔐 SSL — ${x.ssl_score}/100\n🛡 Security — ${x.security_score}/100\n📈 SEO — ${x.seo_score}/100\n⚡ Performance — ${x.performance_score}/100\n🧭 DNS — ${x.dns_score}/100\n⏱ Availability — ${x.availability_score}/100\n\n🕒 ${esc(formatInTimezone(x.scanned_at,user.timezone_configured?user.timezone:'UTC'))}`;
+}
+async function compareText(env, user, domain) {
+  const rows = await latestScanHistory(env,user.id,domain,2);
+  if (rows.length < 2) return `📈 <b>Not enough scan history</b>\n\nRun <code>/scan ${esc(domain)}</code> at least twice to compare changes.`;
+  const [n,o]=rows;
+  const line=(label,a,b,lower=false,suffix='')=>`${label}: <b>${a}${suffix} → ${b}${suffix}</b> ${comparisonArrow(a,b,lower)}`;
+  const sslOld=safeJson(o.metrics_json,{})?.sslExpiry||null, sslNew=safeJson(n.metrics_json,{})?.sslExpiry||null;
+  return `📈 <b>Since Last Scan — ${esc(domain)}</b>\n\n${line('❤️ Health',o.health_score,n.health_score)}\n${line('⚡ Performance',o.performance_score,n.performance_score)}\n${line('📈 SEO',o.seo_score,n.seo_score)}\n${line('🔗 Broken links',o.broken_links,n.broken_links,true)}\n${line('⏱ Availability',o.availability_score,n.availability_score)}\n⚡ LCP: <b>${o.load_ms ?? 'N/A'}ms → ${n.load_ms ?? 'N/A'}ms</b>\n🔐 SSL: <b>${sslOld===sslNew?'No change':'Changed'}</b>\n\n🕒 Latest: ${esc(formatInTimezone(n.scanned_at,user.timezone_configured?user.timezone:'UTC'))}`;
+}
+async function fixesText(env, user, domain) {
+  const rows = await latestScanHistory(env,user.id,domain,1);
+  if (!rows.length) return `🧠 <b>No scan findings yet</b>\n\nRun <code>/scan ${esc(domain)}</code> first.`;
+  const fixes=safeJson(rows[0].fixes_json,[])||[];
+  const icons={high:'🔴',medium:'🟡',low:'🟢'};
+  return `🧠 <b>What Should I Fix? — ${esc(domain)}</b>\n\n${fixes.slice(0,3).map((x,i)=>`${i+1}. ${icons[x.severity]||'•'} ${esc(x.text)}`).join('\n')}\n\nStart with item 1, then tap <b>Recheck</b> after the change.`;
+}
+async function emergencyDoctor(env, user, domain) {
+  if (!(await isVerified(env,user.id,domain))) return `🛡 <b>Ownership verification required</b>\n\nEmergency diagnostics are available for verified monitored websites. Use <code>/add ${esc(domain)}</code>.`;
+  const [a,aaaa,ns,mx,ssl] = await Promise.all([
+    dnsLookup(domain,'A'),dnsLookup(domain,'AAAA'),dnsLookup(domain,'NS'),dnsLookup(domain,'MX'),sslLookup(domain).catch(()=>({expiresAt:null,issuer:null}))
+  ]);
+  let httpStatus=0, finalUrl=`https://${domain}`, headers={}, latency=null, httpError=null;
+  const started=Date.now();
+  try { const p=await fetchText(`https://${domain}`,120000,{signal:AbortSignal.timeout(10000)}); httpStatus=p.status; finalUrl=p.url; headers=p.headers; latency=Date.now()-started; }
+  catch(e){ httpError=short(e.message,160); latency=Date.now()-started; }
+  const hosting=detectHostingProvider({headers,cnames:await dnsLookup(domain,'CNAME')});
+  const dnsProvider=detectDnsProvider(ns);
+  let cause='No active outage detected', confidence=95;
+  if (!a.length && !aaaa.length) { cause='DNS address records are missing or not resolving'; confidence=97; }
+  else if (httpStatus===530) { cause='DNS / origin configuration problem'; confidence=91; }
+  else if (!httpStatus) { cause='Network/origin connection failure'; confidence=88; }
+  else if (httpStatus>=500 && /cloudflare/i.test(hosting)) { cause='Origin server or CDN-to-origin failure'; confidence=86; }
+  else if (httpStatus>=500) { cause='Origin/server application failure'; confidence=87; }
+  else if (!ssl.expiresAt) { cause='Certificate/TLS publication issue'; confidence=78; }
+  const originNote=/cloudflare|vercel|netlify|cloudfront/i.test(hosting)?'Origin is shielded by CDN/proxy; direct origin cannot be safely inferred.':'Origin appears directly exposed by the current response.';
+  return `🆘 <b>Emergency Website Doctor — ${esc(domain)}</b>\n\n1. 🧭 DNS: ${a.length||aaaa.length?'✅ Resolving':'🔴 Failed'}\n2. 📡 HTTP: ${httpStatus?`HTTP ${httpStatus}`:'Connection failed'}\n3. 🔐 SSL: ${ssl.expiresAt?'✅ Certificate found':'⚠️ Certificate not confirmed'}\n4. ↪️ Redirect/final URL: ${esc(short(finalUrl,120))}\n5. ☁️ CDN/Hosting: ${esc(hosting)}\n6. 🌐 Nameservers: ${ns.length?'✅ '+esc(short(ns.join(', '),150)):'🔴 Missing'}\n7. 🏷 DNS provider: ${esc(dnsProvider)}\n8. 🖥 Server response: ${httpStatus&&httpStatus<500?'✅ Responding':'🔴 Problem detected'}${latency!=null?` • ${latency}ms`:''}\n\n<b>Likely cause:</b> ${esc(cause)}\n<b>Confidence:</b> ${confidence}%\n\n💡 ${esc(originNote)}${httpError?`\nTechnical signal: ${esc(httpError)}`:''}`;
+}
+async function captureChangeSnapshot(env, domain) {
+  const [ns,a,aaaa,mx,cname,rdap,ssl,page,robots,sitemap] = await Promise.all([
+    dnsLookup(domain,'NS'),dnsLookup(domain,'A'),dnsLookup(domain,'AAAA'),dnsLookup(domain,'MX'),dnsLookup(domain,'CNAME'),
+    rdapLookup(domain).catch(()=>({})),sslLookup(domain).catch(()=>({expiresAt:null,issuer:null})),
+    fetchText(`https://${domain}`,250000,{signal:AbortSignal.timeout(10000)}).catch(()=>null),
+    fetchText(`https://${domain}/robots.txt`,120000,{signal:AbortSignal.timeout(8000)}).catch(()=>null),
+    fetchText(`https://${domain}/sitemap.xml`,200000,{signal:AbortSignal.timeout(8000)}).catch(()=>null)
+  ]);
+  if (!page) return null;
+  const seo=analyzeSeoHtml(page.text,page.url||`https://${domain}`);
+  return {
+    ns:stableValues(ns),a:stableValues(a),aaaa:stableValues(aaaa),mx:stableValues(mx),
+    ssl:`${ssl.issuer||''}|${ssl.expiresAt||''}`,registrar:rdap.registrar||'',domainExpiry:rdap.expiresAt||'',
+    robotsHash:robots?await sha256Text(robots.text):'',robotsExists:Boolean(robots&&robots.status<400),
+    sitemapHash:sitemap?await sha256Text(sitemap.text):'',sitemapExists:Boolean(sitemap&&sitemap.status<400),
+    title:seo.title||'',description:seo.description||'',hostingProvider:detectHostingProvider({headers:page.headers,cnames:cname}),dnsProvider:detectDnsProvider(ns)
+  };
+}
+function snapshotChangeList(oldSnap,newSnap){
+  const out=[]; const add=(kind,label,a,b)=>out.push({kind,label,oldValue:String(a??''),newValue:String(b??'')});
+  const j=(x)=>JSON.stringify(x||[]);
+  if(j(oldSnap.ns)!==j(newSnap.ns)) add('nameserver','Nameserver changed',oldSnap.ns?.join(', '),newSnap.ns?.join(', '));
+  if(j(oldSnap.a)!==j(newSnap.a)) add('a-record','A record changed',oldSnap.a?.join(', '),newSnap.a?.join(', '));
+  if(j(oldSnap.aaaa)!==j(newSnap.aaaa)) add('aaaa-record','AAAA record changed',oldSnap.aaaa?.join(', '),newSnap.aaaa?.join(', '));
+  if(j(oldSnap.mx)!==j(newSnap.mx)) add('mx-record','MX record changed',oldSnap.mx?.join(', '),newSnap.mx?.join(', '));
+  if(oldSnap.ssl!==newSnap.ssl) add('ssl','SSL certificate changed',oldSnap.ssl,newSnap.ssl);
+  if(oldSnap.registrar!==newSnap.registrar) add('registrar','Registrar changed',oldSnap.registrar,newSnap.registrar);
+  if(oldSnap.domainExpiry!==newSnap.domainExpiry) add('domain-expiry','Domain expiry date changed',oldSnap.domainExpiry,newSnap.domainExpiry);
+  if(oldSnap.robotsHash!==newSnap.robotsHash) add('robots','robots.txt changed',oldSnap.robotsHash?'Previous version':'Missing',newSnap.robotsHash?'New version':'Missing');
+  if(oldSnap.sitemapExists && !newSnap.sitemapExists) add('sitemap','Sitemap disappeared','Available','Missing');
+  else if(oldSnap.sitemapHash!==newSnap.sitemapHash) add('sitemap','Sitemap changed',oldSnap.sitemapHash?'Previous version':'Missing',newSnap.sitemapHash?'New version':'Missing');
+  if(oldSnap.title!==newSnap.title) add('title','Homepage title changed',oldSnap.title,newSnap.title);
+  if(oldSnap.description!==newSnap.description) add('meta','Homepage meta description changed',oldSnap.description,newSnap.description);
+  if(oldSnap.hostingProvider!==newSnap.hostingProvider) add('hosting','Hosting/CDN changed',oldSnap.hostingProvider,newSnap.hostingProvider);
+  if(oldSnap.dnsProvider!==newSnap.dnsProvider) add('dns-provider','DNS provider changed',oldSnap.dnsProvider,newSnap.dnsProvider);
+  return out;
+}
+async function smtpConfig(env) {
+  const row=await env.DB.prepare('SELECT * FROM smtp_config WHERE id=1 AND active=1').first();
+  if(!row) return null;
+  try { return {...row,appPassword:await decryptGoogle(env,row.app_password_cipher)}; } catch { return null; }
+}
+function utf8B64(value){ return b64FromBytes(new TextEncoder().encode(String(value))); }
+function wrapB64(value){ return String(value).match(/.{1,76}/g)?.join('\r\n') || ''; }
+async function smtpReadResponse(reader,state){
+  while(true){
+    const lines=state.buffer.split('\r\n');
+    for(let i=0;i<lines.length-1;i++) if(/^\d{3} /.test(lines[i])) { const consumed=lines.slice(0,i+1).join('\r\n')+'\r\n'; const out=state.buffer.slice(0,consumed.length); state.buffer=state.buffer.slice(consumed.length); return out; }
+    const {value,done}=await reader.read(); if(done) throw new Error('SMTP connection closed unexpectedly.'); state.buffer+=new TextDecoder().decode(value,{stream:true}); if(state.buffer.length>50000) throw new Error('SMTP response too large.');
+  }
+}
+function smtpCode(text){ return Number(String(text).match(/^(\d{3})/m)?.[1]||0); }
+async function smtpSendWithCreds(sender,appPassword,{to,subject,text,pdfBytes=null,pdfName=null}){
+  const { connect } = await import('cloudflare:sockets'); const socket=connect({hostname:'smtp.gmail.com',port:465},{secureTransport:'on'}); await socket.opened;
+  const reader=socket.readable.getReader(), writer=socket.writable.getWriter(), state={buffer:''};
+  const write=async(line)=>writer.write(new TextEncoder().encode(line+'\r\n'));
+  const expect=async(codes)=>{const r=await smtpReadResponse(reader,state),c=smtpCode(r); if(!codes.includes(c)) throw new Error(`SMTP ${c||'error'}: ${short(r.replace(/\s+/g,' '),180)}`); return r;};
+  try {
+    await expect([220]); await write('EHLO webdoctorpro'); await expect([250]); await write('AUTH LOGIN'); await expect([334]);
+    await write(btoa(sender)); await expect([334]); await write(btoa(String(appPassword).replace(/\s+/g,''))); await expect([235]);
+    await write(`MAIL FROM:<${sender}>`); await expect([250]); await write(`RCPT TO:<${to}>`); await expect([250,251]); await write('DATA'); await expect([354]);
+    const boundary=`WDP-${randomHex(8)}`;
+    const headers=[`From: WEB DOCTOR PRO <${sender}>`,`To: ${to}`,`Subject: =?UTF-8?B?${utf8B64(subject)}?=`,`MIME-Version: 1.0`];
+    let body='';
+    if(pdfBytes){
+      headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+      body=`--${boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${wrapB64(utf8B64(text))}\r\n--${boundary}\r\nContent-Type: application/pdf; name="${pdfName||'WEB-DOCTOR-PRO-report.pdf'}"\r\nContent-Disposition: attachment; filename="${pdfName||'WEB-DOCTOR-PRO-report.pdf'}"\r\nContent-Transfer-Encoding: base64\r\n\r\n${wrapB64(b64FromBytes(pdfBytes))}\r\n--${boundary}--`;
+    } else { headers.push('Content-Type: text/plain; charset=UTF-8','Content-Transfer-Encoding: base64'); body=wrapB64(utf8B64(text)); }
+    const data=(headers.join('\r\n')+'\r\n\r\n'+body).split('\r\n').map((l)=>l.startsWith('.')?'.'+l:l).join('\r\n');
+    await writer.write(new TextEncoder().encode(data+'\r\n.\r\n')); await expect([250]); await write('QUIT'); await expect([221]);
+    return true;
+  } finally { try{writer.releaseLock();}catch{} try{reader.releaseLock();}catch{} try{await socket.close();}catch{} }
+}
+async function sendUserEmail(env,user,subject,text,opts={}){
+  if(!user?.notification_email) return false; const cfg=await smtpConfig(env); if(!cfg) return false;
+  try { await smtpSendWithCreds(cfg.sender_email,cfg.appPassword,{to:user.notification_email,subject,text,...opts}); return true; }
+  catch(e){ console.error(JSON.stringify({event:'email_send_failed',to:user.notification_email,error:e.message})); return false; }
+}
+async function smtpStatusText(env){
+  const row=await env.DB.prepare('SELECT sender_email,active,updated_at FROM smtp_config WHERE id=1').first();
+  return `📧 <b>Email Notification Sender</b>\n\n${row?`${row.active?'🟢 Enabled':'⚪ Disabled'}\nSender: <code>${esc(row.sender_email)}</code>\nUpdated: ${esc(row.updated_at)}`:'⚪ Not configured'}\n\n<b>Recommended setup</b>\nUse a separate Gmail account for WEB DOCTOR PRO. Enable 2-Step Verification, create a 16-character App Password, then send:\n<code>/admin_email_setup sender@gmail.com APP_PASSWORD</code>\n\nThe setup message is deleted after the password is encrypted. Never use your normal Google Account password.`;
+}
+async function registrationIsOpen(env){ return (await appMeta(env,'registrations_open'))!=='0'; }
+async function waitlistRegistration(env,from,chatId){
+  const now=nowIso();
+  await env.DB.prepare(`INSERT INTO registration_waitlist(telegram_user_id,chat_id,username,first_name,first_seen_at,last_seen_at,notified_reopened_at) VALUES(?,?,?,?,?,?,NULL) ON CONFLICT(telegram_user_id) DO UPDATE SET chat_id=excluded.chat_id,username=excluded.username,first_name=excluded.first_name,last_seen_at=excluded.last_seen_at`).bind(String(from.id),String(chatId),from.username||null,from.first_name||null,now,now).run();
+}
+async function notifyRegistrationWaitlist(env,limit=40){
+  if(!(await registrationIsOpen(env))) return 0;
+  const rows=await env.DB.prepare(`SELECT * FROM registration_waitlist WHERE notified_reopened_at IS NULL ORDER BY first_seen_at LIMIT ?`).bind(limit).all();
+  let sent=0;
+  for(const row of rows.results){
+    try { await send(env,row.chat_id,`🎉 <b>WEB DOCTOR PRO registrations are open again</b>\n\nYou can now create your account and start using Your Website Doctor. Send /start to continue.`); sent++; }
+    catch{};
+    await env.DB.prepare('UPDATE registration_waitlist SET notified_reopened_at=? WHERE telegram_user_id=?').bind(nowIso(),row.telegram_user_id).run();
+  }
+  return sent;
+}
+async function registrationAdminText(env){
+  const open=await registrationIsOpen(env), row=await env.DB.prepare('SELECT COUNT(*) count FROM registration_waitlist WHERE notified_reopened_at IS NULL').first();
+  return `🚪 <b>New User Registration</b>\n\nStatus: ${open?'🟢 OPEN':'🔴 CLOSED'}\nWaiting users: <b>${Number(row?.count||0)}</b>\n\nWhen closed, existing users continue working. New users receive a closed-registration message and are added to the waiting list. When reopened, waiting users are notified automatically.`;
+}
+async function monitorWebsiteChanges(env){
+  const cutoff=new Date(Date.now()-CHANGE_CHECK_INTERVAL_MS).toISOString();
+  const rows=await env.DB.prepare(`SELECT w.id watch_id,w.last_change_check_at,u.*,d.name FROM watches w JOIN users u ON u.id=w.user_id JOIN domains d ON d.id=w.domain_id WHERE w.active=1 AND w.verified_at IS NOT NULL AND u.blocked=0 AND (w.last_change_check_at IS NULL OR w.last_change_check_at<=?) ORDER BY COALESCE(w.last_change_check_at,'') LIMIT 8`).bind(cutoff).all();
+  for(const row of rows.results){
+    try {
+      const snap=await captureChangeSnapshot(env,row.name); if(!snap){ await env.DB.prepare('UPDATE watches SET last_change_check_at=?,updated_at=? WHERE id=?').bind(nowIso(),nowIso(),row.watch_id).run(); continue; }
+      const prevRow=await env.DB.prepare('SELECT snapshot_json FROM website_snapshots WHERE watch_id=?').bind(row.watch_id).first();
+      if(prevRow){
+        const old=safeJson(prevRow.snapshot_json,{})||{}, changes=snapshotChangeList(old,snap);
+        if(changes.length){
+          const detected=nowIso();
+          for(const c of changes) await env.DB.prepare(`INSERT INTO website_change_events(watch_id,kind,label,old_value,new_value,detected_at) VALUES(?,?,?,?,?,?)`).bind(row.watch_id,c.kind,c.label,short(c.oldValue,600),short(c.newValue,600),detected).run();
+          const detail=changes.slice(0,8).map((c)=>`• <b>${esc(c.label)}</b>\n  Old: ${esc(short(c.oldValue||'—',140))}\n  New: ${esc(short(c.newValue||'—',140))}`).join('\n');
+          const text=`⚠️ <b>Website Change Detected</b>\n\n🌐 <b>${esc(row.name)}</b>\n${detail}\n\n🕒 ${esc(formatInTimezone(detected,row.timezone||'UTC'))}\n\n🛡 Review unexpected DNS, certificate, registrar or hosting changes promptly.`;
+          await send(env,row.chat_id,text).catch(()=>{});
+          await sendUserEmail(env,row,`WEB DOCTOR PRO change alert — ${row.name}`,text.replace(/<[^>]+>/g,'')).catch(()=>false);
+        }
+      }
+      await env.DB.prepare(`INSERT INTO website_snapshots(watch_id,snapshot_json,captured_at) VALUES(?,?,?) ON CONFLICT(watch_id) DO UPDATE SET snapshot_json=excluded.snapshot_json,captured_at=excluded.captured_at`).bind(row.watch_id,JSON.stringify(snap),nowIso()).run();
+      await env.DB.prepare('UPDATE watches SET last_change_check_at=?,updated_at=? WHERE id=?').bind(nowIso(),nowIso(),row.watch_id).run();
+    } catch(e){ console.error(JSON.stringify({event:'change_monitor_failed',domain:row.name,error:e.message})); }
+  }
+}
+async function cleanupMonitoringHistory(env){
+  const old=new Date(Date.now()-MONITOR_RETENTION_DAYS*86400000).toISOString();
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM uptime_samples WHERE checked_at<?').bind(old),
+    env.DB.prepare('DELETE FROM website_change_events WHERE detected_at<?').bind(old)
+  ]).catch(()=>{});
 }
 
 async function dailyUsage(env, user) {
@@ -545,6 +851,7 @@ function adminMenuMarkup() {
     [{ text: '📊 Stats', callback_data: 'admin:stats' }, { text: '👥 Users', callback_data: 'admin:users' }],
     [{ text: '🎟 Coupons', callback_data: 'admin:coupons' }, { text: '📣 Ads', callback_data: 'admin:ads' }],
     [{ text: '📢 Broadcasts', callback_data: 'admin:broadcasts' }, { text: '💎 Plans', callback_data: 'admin:plans' }],
+    [{ text: '🚪 Registrations', callback_data: 'admin:registrations' }, { text: '📧 Email', callback_data: 'admin:email' }],
     [{ text: '➕ Create Ad', callback_data: 'admin:adcreate' }, { text: '➕ Broadcast', callback_data: 'admin:broadcastcreate' }],
     [{ text: '🔄 Refresh', callback_data: 'admin:home' }]
   ] };
@@ -715,6 +1022,11 @@ async function syncBotProfile(env) {
       { command: 'add', description: '🛡 Verify ownership & monitor' },
       { command: 'verify', description: '🔄 Verify DNS ownership record' },
       { command: 'schedule', description: '🗓 Schedule signed PDF reports' },
+      { command: 'score', description: '❤️ Website health score' },
+      { command: 'compare', description: '📈 Compare latest scans' },
+      { command: 'fix', description: '🧠 Top fixes first' },
+      { command: 'emergency', description: '🆘 Emergency website diagnostics' },
+      { command: 'email', description: '📧 Email alert destination' },
       { command: 'google', description: '🔗 Connect your Google account data' },
       { command: 'plans', description: '💎 Plans & Telegram Stars' },
       { command: 'team', description: '🏢 Team workspace & activation' },
@@ -740,6 +1052,9 @@ async function syncBotProfile(env) {
         { command: 'admin_broadcast', description: '➕ Create a broadcast' },
         { command: 'admin_plan', description: '💎 Set exact user plan' },
         { command: 'admin_gift', description: '🎁 Queue a coin gift' },
+        { command: 'admin_registrations', description: '🚪 Open/close new users' },
+        { command: 'admin_email', description: '📧 Email sender settings' },
+        { command: 'admin_email_setup', description: '🔐 Configure Gmail App Password' },
         { command: 'admin_cancel', description: '✖️ Cancel admin draft mode' }
       ];
       await tg(env, 'setMyCommands', { commands: adminCommands, scope: { type: 'chat', chat_id: Number(adminId) } });
@@ -1136,6 +1451,7 @@ async function fullScanData(env, user, domain, onProgress = async () => {}) {
   };
   base.keywords = await keywordSuggestions(env, domain, seo, searchConsole);
   base.recommendations = await smartRecommendations(env, base);
+  await enrichHealthReport(env, user, base);
 
   await saveDomain(env, rdap, {
     sslExpiresAt: ssl.expiresAt, sslIssuer: ssl.issuer, sslCheckedAt: nowIso(), sslNextCheckAt: new Date(Date.now() + 24 * 3600000).toISOString(),
@@ -1148,7 +1464,9 @@ async function fullScanData(env, user, domain, onProgress = async () => {}) {
 }
 function fullScanSummary(report) {
   const speed = report.pageSpeed?.performance == null ? 'N/A' : `${report.pageSpeed.performance}/100`;
-  return `🧪 <b>Full Scan Complete</b>\n\n🌐 <b>${esc(report.domain)}</b>\n📈 SEO: <b>${report.seo.score}/100</b> — ${scoreLabel(report.seo.score)}\n🌍 GEO: <b>${report.geoAeo.geoScore}/100</b>\n💬 AEO: <b>${report.geoAeo.aeoScore}/100</b>\n⚡ Mobile performance: <b>${speed}</b>\n🔗 Broken links: <b>${report.links.broken.length}</b> / ${report.links.checked} checked\n📄 robots.txt: ${report.robots.exists ? '✅' : '❌'}  •  Sitemap: ${report.sitemap.exists ? '✅' : '❌'}\n\n📑 <b>Signed PDF report:</b> ${esc(report.reportId)}\n💡 The PDF includes prioritized improvements, keyword opportunities, provider details, expiry data and connected Google metrics when available.`;
+  const h=report.health||{};
+  const fixes=(report.topFixes||[]).slice(0,3).map((x,i)=>`${i+1}. ${x.severity==='high'?'🔴':x.severity==='medium'?'🟡':'🟢'} ${esc(x.text)}`).join('\n');
+  return `🧪 <b>Full Scan Complete</b>\n\n🌐 <b>${esc(report.domain)}</b>\n❤️ <b>WEB DOCTOR SCORE: ${h.healthScore ?? 'N/A'}/100</b>\n\n📅 Domain: ${h.domainScore ?? 'N/A'}/100 • 🔐 SSL: ${h.sslScore ?? 'N/A'}/100\n🛡 Security: ${h.securityScore ?? 'N/A'}/100 • 🧭 DNS: ${h.dnsScore ?? 'N/A'}/100\n📈 SEO: <b>${report.seo.score}/100</b> • ⚡ Performance: <b>${speed}</b>\n⏱ Availability: <b>${h.availabilityScore ?? 'N/A'}/100</b>\n🌍 GEO: ${report.geoAeo.geoScore}/100 • 💬 AEO: ${report.geoAeo.aeoScore}/100\n🔗 Broken links: <b>${report.links.broken.length}</b> / ${report.links.checked} checked\n📄 robots.txt: ${report.robots.exists ? '✅' : '❌'} • Sitemap: ${report.sitemap.exists ? '✅' : '❌'}\n\n🧠 <b>Top fixes</b>\n${fixes||'✅ No urgent fix detected.'}\n\n📑 <b>Signed PDF report:</b> ${esc(report.reportId)}`;
 }
 async function runFullScan(env, chatId, user, domain, { silentProgress = false, scheduled = false, preflightDone = false } = {}) {
   if (!preflightDone && await isHttp530Domain(domain)) { await send(env, chatId, invalidDomain530Text(domain)); return null; }
@@ -1160,7 +1478,7 @@ async function runFullScan(env, chatId, user, domain, { silentProgress = false, 
     if (!silentProgress) await finishProgress(env, chatId, msg.message_id, `Scanning ${domain}`, 'Audit complete. Preparing your PDF…');
     const filename = `WEB-DOCTOR-PRO-${domain.replace(/[^a-z0-9.-]/gi, '-')}-${report.reportId}.pdf`;
     await sendDocument(env, chatId, report.pdfBytes, filename, `📑 <b>WEB DOCTOR PRO ${scheduled ? 'Scheduled ' : ''}Report</b>\n🌐 ${esc(domain)}\n🆔 ${esc(report.reportId)}\n🕒 ${esc(report.generatedLocal)}`, domainButtons(domain, Boolean(await isVerified(env, user.id, domain)), Boolean(await isVerified(env, user.id, domain))));
-    await send(env, chatId, fullScanSummary(report), { reply_markup: scheduleButtons(domain) });
+    await send(env, chatId, fullScanSummary(report), { reply_markup: healthActionButtons(domain) });
     return report;
   } catch (e) {
     if (msg) await edit(env, chatId, msg.message_id, `⚠️ <b>Scan could not finish</b>\n\n🌐 ${esc(domain)}\n${esc(short(e.message, 500))}\n\nTry again in a moment or use /check for a lighter health check.`);
@@ -1346,6 +1664,20 @@ async function handleAdminCommand(env, msg, user, cmd, args) {
   const chatId = msg.chat.id;
   if (cmd === '/admin') return void await send(env, chatId, await adminStatsText(env), { reply_markup: adminMenuMarkup() });
   if (cmd === '/admin_cancel') { await clearAdminSession(env,user.id); return void await send(env,chatId,'✅ Admin draft mode cleared.'); }
+
+  if (cmd === '/admin_registrations') return void await send(env,chatId,await registrationAdminText(env),{reply_markup:{inline_keyboard:[[{text:'🟢 Open',callback_data:'adminreg:open'},{text:'🔴 Close',callback_data:'adminreg:close'}],[{text:'🔄 Refresh',callback_data:'admin:registrations'}],[{text:'↩️ Admin Home',callback_data:'admin:home'}]]}});
+  if (cmd === '/admin_email') return void await send(env,chatId,await smtpStatusText(env),{reply_markup:{inline_keyboard:[[{text:'🧪 Send Test',callback_data:'adminemail:test'},{text:'⏯ Toggle',callback_data:'adminemail:toggle'}],[{text:'📖 App Password Guide',callback_data:'adminemail:guide'}],[{text:'↩️ Admin Home',callback_data:'admin:home'}]]}});
+  if (cmd === '/admin_email_setup') {
+    const sender=String(args[0]||'').trim().toLowerCase(), password=String(args.slice(1).join('')||'').replace(/\s+/g,'');
+    if(!/^[^\s@]+@gmail\.com$/.test(sender)||password.length<12) return void await send(env,chatId,'Usage: <code>/admin_email_setup secondaccount@gmail.com 16_CHAR_APP_PASSWORD</code>');
+    await deleteTelegramMessage(env,chatId,msg.message_id);
+    try { await smtpSendWithCreds(sender,password,{to:sender,subject:'WEB DOCTOR PRO email sender test',text:'Your WEB DOCTOR PRO Gmail SMTP sender is working.'}); }
+    catch(e){ return void await send(env,chatId,`❌ <b>Email sender test failed</b>\n\n${esc(short(e.message,300))}\n\nCheck the Gmail address, 2-Step Verification and App Password.`); }
+    const cipher=await encryptGoogle(env,password);
+    await env.DB.prepare(`INSERT INTO smtp_config(id,sender_email,app_password_cipher,active,created_at,updated_at) VALUES(1,?,?,1,?,?) ON CONFLICT(id) DO UPDATE SET sender_email=excluded.sender_email,app_password_cipher=excluded.app_password_cipher,active=1,updated_at=excluded.updated_at`).bind(sender,cipher,nowIso(),nowIso()).run();
+    return void await send(env,chatId,'✅ <b>Email sender configured</b>\n\nThe App Password was encrypted and the setup message was deleted. A test email was sent successfully.');
+  }
+
   if (cmd === '/admin_users') { const v = await adminUsersView(env); return void await send(env, chatId, v.text, { reply_markup: v.markup }); }
   if (cmd === '/admin_user') {
     if (!args[0]) return void await send(env, chatId, 'Usage: <code>/admin_user TELEGRAM_ID</code>');
@@ -1482,7 +1814,7 @@ async function handleCommand(env, msg, user) {
     return;
   }
   if (cmd === '/about') return void await send(env, chatId, `🩺 <b>WEB DOCTOR PRO</b>\n<b>Your Website Doctor.</b>\n\nMonitor uptime, domain and certificate expiry, audit SEO/GEO/AEO, verify website ownership, and receive signed PDF reports and automatic Telegram alerts.\n\n📦 v${VERSION}\n👨‍💻 Developer: ${DEVELOPER}\n🔗 ${GITHUB_URL}`);
-  if (cmd === '/help') return void await send(env, chatId, `${welcome(user.first_name)}\n\n<b>Commands</b>\n/check example.com — quick check\n/scan example.com — full scan + signed PDF\n/seo example.com — SEO/GEO/AEO\n/performance example.com — PageSpeed\n/ssl example.com — certificate expiry\n/provider example.com — hosting/DNS/registrar\n/links example.com — broken links\n/robots example.com — robots/sitemap/llms.txt\n/keywords example.com — keyword opportunities\n/add example.com — verify + monitor\n/verify example.com — re-check DNS TXT\n/schedule example.com weekly — scheduled reports\n/google — connect your own Google account data\n/plans — plans & Stars\n/team — Team workspace status\n/team_code — new 24-hour Team activation code\n/team_activate CODE @channel — activate a channel\n/invite — referral link\n/coins — coin balance/rewards\n/coupon CODE — redeem coupon\n/list — monitored sites\n/remove example.com — stop monitoring\n/status — bot status\n/settings — settings & usage`);
+  if (cmd === '/help') return void await send(env, chatId, `${welcome(user.first_name)}\n\n<b>Commands</b>\n/check example.com — quick check\n/scan example.com — full scan + signed PDF\n/seo example.com — SEO/GEO/AEO\n/performance example.com — PageSpeed\n/ssl example.com — certificate expiry\n/provider example.com — hosting/DNS/registrar\n/links example.com — broken links\n/robots example.com — robots/sitemap/llms.txt\n/keywords example.com — keyword opportunities\n/add example.com — verify + monitor\n/verify example.com — re-check DNS TXT\n/schedule example.com weekly — scheduled reports\n/score example.com — website health score\n/compare example.com — compare latest scans\n/fix example.com — top 3 fixes\n/emergency example.com — outage diagnostics\n/email you@example.com — email alerts\n/google — connect your own Google account data\n/plans — plans & Stars\n/team — Team workspace status\n/team_code — new 24-hour Team activation code\n/team_activate CODE @channel — activate a channel\n/invite — referral link\n/coins — coin balance/rewards\n/coupon CODE — redeem coupon\n/list — monitored sites\n/remove example.com — stop monitoring\n/status — bot status\n/settings — settings & usage`);
   if (cmd === '/timezone') {
     const tz = args.join(' '); if (!tz) return void await requireTimezone(env, chatId, user);
     if (!(await setTimezone(env, user.id, tz))) return void await send(env, chatId, '❌ Invalid timezone. Example: <code>/timezone Asia/Kolkata</code>');
@@ -1510,6 +1842,26 @@ async function handleCommand(env, msg, user) {
     const result = await activateTeamWorkspace(env, targetChat, user, code);
     return void await send(env, chatId, result.ok ? `🎉 <b>Team workspace activated</b>\n\n🏢 ${esc(result.workspaceTitle)}\n📅 Until: ${esc(formatInTimezone(result.expiry, user.timezone_configured ? user.timezone : 'UTC'))}` : `❌ <b>Team activation failed</b>\n\n${esc(result.reason)}`);
   }
+
+  if (cmd === '/email') {
+    const value=String(args[0]||'').trim().toLowerCase();
+    if(!value) return void await send(env,chatId,`📧 <b>Email notifications</b>\n\nCurrent: ${user.notification_email?`<code>${esc(user.notification_email)}</code>`:'Not configured'}\n\nSet: <code>/email you@example.com</code>\nDisable: <code>/email off</code>\n\nEmail alerts can include downtime/recovery, security-relevant website changes and Pro/Team scheduled PDF reports.`);
+    if(value==='off'){ await env.DB.prepare('UPDATE users SET notification_email=NULL,updated_at=? WHERE id=?').bind(nowIso(),user.id).run(); return void await send(env,chatId,'✅ Email notifications disabled.'); }
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return void await send(env,chatId,'❌ Enter a valid email address.');
+    await env.DB.prepare('UPDATE users SET notification_email=?,updated_at=? WHERE id=?').bind(value,nowIso(),user.id).run(); user.notification_email=value;
+    await send(env,chatId,`✅ <b>Email notifications enabled</b>\n\n📧 <code>${esc(value)}</code>\n\nIf the platform sender is configured, alerts will be delivered here.`);
+    await sendUserEmail(env,user,'WEB DOCTOR PRO email notifications enabled','Your WEB DOCTOR PRO email notifications are configured successfully.').catch(()=>false);
+    return;
+  }
+  if (['/score','/compare','/fix','/emergency'].includes(cmd)) {
+    if(!args[0]) return void await send(env,chatId,`💡 Usage: <code>${cmd} example.com</code>`);
+    let domain; try{domain=normalizeDomain(args[0]);}catch{return void await send(env,chatId,'❌ <b>Invalid domain</b>');}
+    if(cmd==='/score') return void await send(env,chatId,await healthScoreText(env,user,domain),{reply_markup:healthActionButtons(domain)});
+    if(cmd==='/compare') return void await send(env,chatId,await compareText(env,user,domain),{reply_markup:healthActionButtons(domain)});
+    if(cmd==='/fix') return void await send(env,chatId,await fixesText(env,user,domain),{reply_markup:healthActionButtons(domain)});
+    if(cmd==='/emergency') return void await send(env,chatId,await emergencyDoctor(env,user,domain),{reply_markup:healthActionButtons(domain)});
+  }
+
   if (cmd === '/gift') return void await sendPendingGiftBox(env, user, chatId, { force: true });
   if (cmd === '/invite') return void await send(env, chatId, await referralText(env, user));
   if (cmd === '/coins') {
@@ -1625,6 +1977,20 @@ async function handleCallback(env, q) {
     await answerCb(env, q.id, 'Admin');
     if (data === 'admin:home' || data === 'admin:stats') return send(env, q.message.chat.id, await adminStatsText(env), { reply_markup: adminMenuMarkup() });
     if (data === 'admin:users') { const v = await adminUsersView(env); return send(env, q.message.chat.id, v.text, { reply_markup: v.markup }); }
+    if (data === 'admin:registrations') return send(env,q.message.chat.id,await registrationAdminText(env),{reply_markup:{inline_keyboard:[[{text:'🟢 Open',callback_data:'adminreg:open'},{text:'🔴 Close',callback_data:'adminreg:close'}],[{text:'🔄 Refresh',callback_data:'admin:registrations'}],[{text:'↩️ Admin Home',callback_data:'admin:home'}]]}});
+    if (data === 'admin:email') return send(env,q.message.chat.id,await smtpStatusText(env),{reply_markup:{inline_keyboard:[[{text:'🧪 Send Test',callback_data:'adminemail:test'},{text:'⏯ Toggle',callback_data:'adminemail:toggle'}],[{text:'📖 App Password Guide',callback_data:'adminemail:guide'}],[{text:'↩️ Admin Home',callback_data:'admin:home'}]]}});
+    if (data.startsWith('adminreg:')) { const open=data.endsWith(':open'); await setAppMeta(env,'registrations_open',open?'1':'0'); if(open) await notifyRegistrationWaitlist(env,80); return send(env,q.message.chat.id,await registrationAdminText(env),{reply_markup:adminMenuMarkup()}); }
+    if (data.startsWith('adminemail:')) { const action=data.split(':')[1]; const cfg=await env.DB.prepare('SELECT * FROM smtp_config WHERE id=1').first(); if(action==='guide') return send(env,q.message.chat.id,`📖 <b>Gmail App Password Setup</b>
+
+1. Use a separate Gmail account for WEB DOCTOR PRO.
+2. Turn on Google 2-Step Verification.
+3. Open Google Account → Security → App passwords.
+4. Create an App Password named WEB DOCTOR PRO.
+5. Copy the 16-character password once.
+6. Send privately here:
+<code>/admin_email_setup secondaccount@gmail.com APP_PASSWORD</code>
+
+⚠️ Do not use your normal Google Account password.`); if(!cfg) return send(env,q.message.chat.id,'⚪ Email sender is not configured. Use /admin_email for setup instructions.'); if(action==='toggle'){await env.DB.prepare('UPDATE smtp_config SET active=CASE WHEN active=1 THEN 0 ELSE 1 END,updated_at=? WHERE id=1').bind(nowIso()).run(); return send(env,q.message.chat.id,await smtpStatusText(env),{reply_markup:adminMenuMarkup()});} if(action==='test'){const x=await smtpConfig(env); if(!x)return send(env,q.message.chat.id,'⚪ Email sender is disabled or unavailable.'); try{await smtpSendWithCreds(x.sender_email,x.appPassword,{to:x.sender_email,subject:'WEB DOCTOR PRO email test',text:'Email notifications are working.'});return send(env,q.message.chat.id,'✅ Test email sent successfully.');}catch(e){return send(env,q.message.chat.id,`❌ Test failed: ${esc(short(e.message,300))}`);}} }
     if (data === 'admin:coupons') return send(env, q.message.chat.id, await adminCouponsText(env), { reply_markup: adminMenuMarkup() });
     if (data === 'admin:ads') { const v = await adminAdsView(env); return edit(env, q.message.chat.id, q.message.message_id, v.text, { reply_markup: v.markup }); }
     if (data.startsWith('adminads:')) {
@@ -1684,6 +2050,10 @@ async function handleCallback(env, q) {
   }
   if (action.startsWith('schedule_')) return setSchedule(env, q.message.chat.id, user, domain, action.slice('schedule_'.length));
   if (action === 'statusdomain') return send(env, q.message.chat.id, `✅ <b>${esc(domain)}</b> is verified and monitored.`, { reply_markup: scheduleButtons(domain) });
+  if (action === 'score') return send(env,q.message.chat.id,await healthScoreText(env,user,domain),{reply_markup:healthActionButtons(domain)});
+  if (action === 'compare') return send(env,q.message.chat.id,await compareText(env,user,domain),{reply_markup:healthActionButtons(domain)});
+  if (action === 'fix') return send(env,q.message.chat.id,await fixesText(env,user,domain),{reply_markup:healthActionButtons(domain)});
+  if (action === 'emergency') return send(env,q.message.chat.id,await emergencyDoctor(env,user,domain),{reply_markup:healthActionButtons(domain)});
   if (['check','scan','seo','performance','ssl','provider','links','robots','keywords'].includes(action)) return runTool(env, q.message.chat.id, user, action, domain);
 }
 
@@ -1694,6 +2064,8 @@ async function handleTelegram(env, update) {
   const msg = update.message || update.channel_post; if (!msg?.chat) return;
   if (msg.chat.type !== 'private') return handleTeamChatUpdate(env, msg);
   if (!msg.from) return;
+  const existingUser = await env.DB.prepare('SELECT * FROM users WHERE telegram_user_id=?').bind(String(msg.from.id)).first();
+  if (!existingUser && !(await registrationIsOpen(env))) { await waitlistRegistration(env,msg.from,msg.chat.id); await reactToMessage(env,msg,'🚫'); return send(env,msg.chat.id,'🚪 <b>New user registration is currently closed</b>\n\nWEB DOCTOR PRO is temporarily not accepting new accounts. You have been added to the waiting list automatically.\n\nWhen registrations reopen, I will message you here.'); }
   let user = await upsertUser(env, msg.from, msg.chat.id);
   if (user.blocked) { await reactToMessage(env,msg,'🚫'); return send(env,msg.chat.id,'🚫 <b>Account access unavailable</b>\n\nPlease contact support if you believe this is a mistake.'); }
   await sendPendingGiftBox(env, user, msg.chat.id).catch(() => false);
@@ -1729,36 +2101,49 @@ async function refreshDomains(env) {
 }
 async function sendExpiryAlerts(env) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
-  const rows = await env.DB.prepare(`SELECT w.id watch_id,w.notify_days,u.chat_id,u.timezone,d.name,d.expires_at,d.ssl_expires_at FROM watches w JOIN users u ON u.id=w.user_id JOIN domains d ON d.id=w.domain_id WHERE w.active=1 AND w.verified_at IS NOT NULL AND u.timezone_configured=1 AND u.blocked=0`).all();
+  const rows = await env.DB.prepare(`SELECT w.id watch_id,w.notify_days,u.*,d.name,d.expires_at,d.ssl_expires_at FROM watches w JOIN users u ON u.id=w.user_id JOIN domains d ON d.id=w.domain_id WHERE w.active=1 AND w.verified_at IS NOT NULL AND u.timezone_configured=1 AND u.blocked=0`).all();
   for (const row of rows.results) {
     let thresholds; try { thresholds = JSON.parse(row.notify_days); } catch { thresholds = ALERT_DAYS; }
     for (const item of [{kind:'domain-expiry',iso:row.expires_at,emoji:'📅',label:'Domain'}, {kind:'ssl-expiry',iso:row.ssl_expires_at,emoji:'🔐',label:'Certificate'}]) {
       const d = daysUntil(item.iso); if (d === null || !thresholds.includes(d)) continue;
       const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO notifications(watch_id,kind,threshold,expiry_snapshot,sent_at) VALUES(?,?,?,?,?)`).bind(row.watch_id,item.kind,d,item.iso,nowIso()).run();
       if (!inserted.meta.changes) continue;
-      try { await send(env,row.chat_id,`🚨 <b>${item.label} Expiry Alert</b>\n\n🌐 <b>${esc(row.name)}</b>\n${item.emoji} ${d===0 ? 'Expires today' : `Expires in ${d} day(s)`}\n🕒 ${esc(formatInTimezone(item.iso,row.timezone))}\n\n💡 Renew or verify it early to avoid interruption.`); }
+      try { const alert=`🚨 <b>${item.label} Expiry Alert</b>\n\n🌐 <b>${esc(row.name)}</b>\n${item.emoji} ${d===0 ? 'Expires today' : `Expires in ${d} day(s)`}\n🕒 ${esc(formatInTimezone(item.iso,row.timezone))}\n\n💡 Renew or verify it early to avoid interruption.`; await send(env,row.chat_id,alert); await sendUserEmail(env,row,`${item.label} expiry alert — ${row.name}`,alert.replace(/<[^>]+>/g,'')).catch(()=>false); }
       catch (e) { console.error(JSON.stringify({event:'expiry_alert_failed',domain:row.name,error:e.message})); }
     }
   }
 }
 async function checkUptime(env) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
-  const rows = await env.DB.prepare(`SELECT w.id watch_id,w.uptime_state,w.uptime_last_status,w.uptime_fail_count,u.chat_id,u.timezone,d.name FROM watches w JOIN users u ON u.id=w.user_id JOIN domains d ON d.id=w.domain_id WHERE w.active=1 AND w.verified_at IS NOT NULL AND u.blocked=0 ORDER BY COALESCE(w.uptime_last_checked_at,'') LIMIT 80`).all();
+  const rows = await env.DB.prepare(`SELECT w.id watch_id,w.uptime_state,w.uptime_last_status,w.uptime_fail_count,w.incident_started_at,u.*,d.name FROM watches w JOIN users u ON u.id=w.user_id JOIN domains d ON d.id=w.domain_id WHERE w.active=1 AND w.verified_at IS NOT NULL AND u.blocked=0 ORDER BY COALESCE(w.uptime_last_checked_at,'') LIMIT 80`).all();
   for (const row of rows.results) {
-    let status = 0, error = null, state = 'down';
-    try {
-      const r = await fetch(`https://${row.name}`, { method: 'HEAD', redirect: 'follow', headers: { 'user-agent': `WEB-DOCTOR-PRO/${VERSION}` }, signal: AbortSignal.timeout(10000) });
-      status = r.status; state = r.status < 500 ? 'up' : 'down';
-    } catch (e) { error = short(e.message, 300); state = 'down'; }
-    const previous = row.uptime_state || 'unknown', changed = previous !== 'unknown' && previous !== state;
-    const failCount = state === 'down' ? Number(row.uptime_fail_count || 0) + 1 : 0;
-    await env.DB.prepare(`UPDATE watches SET uptime_state=?,uptime_last_status=?,uptime_last_checked_at=?,uptime_changed_at=CASE WHEN uptime_state<>? THEN ? ELSE uptime_changed_at END,uptime_last_error=?,uptime_fail_count=?,updated_at=? WHERE id=?`)
-      .bind(state,status || null,nowIso(),state,nowIso(),error,failCount,nowIso(),row.watch_id).run();
-    if (changed) {
-      try {
-        if (state === 'down') await send(env,row.chat_id,`🚨 <b>Website Uptime Alert</b>\n\n🌐 <b>${esc(row.name)}</b>\n🔴 Website is currently unavailable or returning a server error.\n📡 Status: ${status || 'Connection failed'}\n🕒 ${esc(formatInTimezone(nowIso(),row.timezone || 'UTC'))}\n\nWEB DOCTOR PRO will keep checking and notify you when it recovers.`);
-        else await send(env,row.chat_id,`✅ <b>Website Recovered</b>\n\n🌐 <b>${esc(row.name)}</b>\n🟢 Website is reachable again.\n📡 HTTP ${status}\n🕒 ${esc(formatInTimezone(nowIso(),row.timezone || 'UTC'))}`);
-      } catch (e) { console.error(JSON.stringify({event:'uptime_alert_failed',domain:row.name,error:e.message})); }
+    let status=0,error=null,rawState='down'; const started=Date.now();
+    try { const r=await fetch(`https://${row.name}`,{method:'HEAD',redirect:'follow',headers:{'user-agent':`WEB-DOCTOR-PRO/${VERSION}`},signal:AbortSignal.timeout(10000)}); status=r.status; rawState=r.status<500?'up':'down'; }
+    catch(e){ error=short(e.message,300); rawState='down'; }
+    const latency=Date.now()-started, previous=row.uptime_state||'unknown';
+    const failCount=rawState==='down'?Number(row.uptime_fail_count||0)+1:0;
+    let state=rawState, incidentStarted=row.incident_started_at;
+    if(rawState==='down' && failCount<UPTIME_CONFIRM_FAILURES){ state=previous==='down'?'down':previous; if(!incidentStarted) incidentStarted=nowIso(); }
+    if(rawState==='down' && failCount>=UPTIME_CONFIRM_FAILURES && !incidentStarted) incidentStarted=nowIso();
+    const downTransition=rawState==='down' && failCount>=UPTIME_CONFIRM_FAILURES && previous!=='down';
+    const recovery=rawState==='up' && previous==='down';
+    if(rawState==='up' && previous!=='down') incidentStarted=null;
+    await env.DB.prepare(`INSERT INTO uptime_samples(watch_id,checked_at,state,http_status,latency_ms) VALUES(?,?,?,?,?)`).bind(row.watch_id,nowIso(),rawState,status||null,latency).run();
+    await env.DB.prepare(`UPDATE watches SET uptime_state=?,uptime_last_status=?,uptime_last_checked_at=?,uptime_changed_at=CASE WHEN uptime_state<>? THEN ? ELSE uptime_changed_at END,uptime_last_error=?,uptime_fail_count=?,incident_started_at=?,updated_at=? WHERE id=?`).bind(state,status||null,nowIso(),state,nowIso(),error,failCount,incidentStarted,nowIso(),row.watch_id).run();
+    if(downTransition){
+      const startAt=incidentStarted||nowIso();
+      await env.DB.prepare(`INSERT INTO uptime_incidents(watch_id,started_at,start_status,created_at) VALUES(?,?,?,?)`).bind(row.watch_id,startAt,status||null,nowIso()).run();
+      const text=`🚨 <b>WEBSITE DOWN</b>\n\n🌐 <b>${esc(row.name)}</b>\n🔴 Confirmed unavailable after ${UPTIME_CONFIRM_FAILURES} consecutive checks\n📡 ${status?`HTTP ${status}`:'Connection failed'}\n🕒 Detected: ${esc(formatInTimezone(startAt,row.timezone||'UTC'))}\n\nWEB DOCTOR PRO will keep checking and send one recovery alert when the site returns.`;
+      await send(env,row.chat_id,text).catch(()=>{}); await sendUserEmail(env,row,`WEBSITE DOWN — ${row.name}`,text.replace(/<[^>]+>/g,'')).catch(()=>false);
+    }
+    if(recovery){
+      const open=await env.DB.prepare(`SELECT * FROM uptime_incidents WHERE watch_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1`).bind(row.watch_id).first();
+      const startAt=open?.started_at||row.incident_started_at||nowIso(), duration=Math.max(0,Math.round((Date.now()-new Date(startAt).getTime())/1000));
+      if(open) await env.DB.prepare(`UPDATE uptime_incidents SET ended_at=?,recovery_status=?,duration_seconds=? WHERE id=?`).bind(nowIso(),status||null,duration,open.id).run();
+      await env.DB.prepare('UPDATE watches SET incident_started_at=NULL,updated_at=? WHERE id=?').bind(nowIso(),row.watch_id).run();
+      const mins=duration<60?`${duration}s`:`${Math.floor(duration/60)}m ${duration%60}s`;
+      const text=`🟢 <b>WEBSITE RECOVERED</b>\n\n🌐 <b>${esc(row.name)}</b>\n✅ Website is reachable again\n📡 HTTP ${status}\n⏱ Downtime: <b>${mins}</b>\n🕒 Recovered: ${esc(formatInTimezone(nowIso(),row.timezone||'UTC'))}`;
+      await send(env,row.chat_id,text).catch(()=>{}); await sendUserEmail(env,row,`WEBSITE RECOVERED — ${row.name}`,text.replace(/<[^>]+>/g,'')).catch(()=>false);
     }
   }
 }
@@ -1779,7 +2164,8 @@ async function sendScheduledReports(env) {
         await env.DB.prepare('UPDATE watches SET next_report_at=? WHERE id=?').bind(retry,row.watch_id).run();
         continue;
       }
-      await runFullScan(env, row.chat_id, usage.user || row, row.name, { silentProgress: true, scheduled: true });
+      const scheduledReport = await runFullScan(env, row.chat_id, usage.user || row, row.name, { silentProgress: true, scheduled: true });
+      if (scheduledReport && row.notification_email && ['pro','team'].includes(activePlan(usage.user || row))) { const filename=`WEB-DOCTOR-PRO-${row.name}-${scheduledReport.reportId}.pdf`; const plain=`${row.report_schedule.toUpperCase()} WEB DOCTOR PRO report for ${row.name}\nHealth score: ${scheduledReport.health?.healthScore ?? 'N/A'}/100\nUptime: ${Number(scheduledReport.availability?.uptime ?? 100).toFixed(2)}%\nIncidents (30d): ${scheduledReport.availability?.incidents ?? 0}\nSEO: ${scheduledReport.seo?.score ?? 'N/A'}/100\nPerformance: ${scheduledReport.pageSpeed?.performance ?? 'N/A'}/100`; await sendUserEmail(env,usage.user || row,`WEB DOCTOR PRO ${row.report_schedule} report — ${row.name}`,plain,{pdfBytes:scheduledReport.pdfBytes,pdfName:filename}).catch(()=>false); }
       await maybeServeAd(env, usage.user || row, row.chat_id).catch(() => null);
       const interval = scheduleIntervalMs(row.report_schedule), next = interval ? new Date(Date.now() + interval).toISOString() : null;
       await env.DB.prepare('UPDATE watches SET last_report_at=?,next_report_at=?,updated_at=? WHERE id=?').bind(nowIso(),next,nowIso(),row.watch_id).run();
@@ -1836,6 +2222,9 @@ export default {
       await cleanupCoupons(env);
       await processBroadcasts(env);
       await checkUptime(env);
+      await monitorWebsiteChanges(env);
+      await notifyRegistrationWaitlist(env);
+      await cleanupMonitoringHistory(env);
       await refreshDomains(env);
       await sendExpiryAlerts(env);
       await sendScheduledReports(env);
