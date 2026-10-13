@@ -9,7 +9,7 @@ const VERSION = '1.6.0';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
-const MINI_APP_URL = `${PUBLIC_BASE_URL}/app`;
+const MINI_APP_URL = `${PUBLIC_BASE_URL}/app?rev=20261013-1`;
 const LAST_UPDATED_AT = '2026-10-13T09:40:00+05:30';
 const ALERT_DAYS = [30, 14, 7, 3, 1, 0];
 const TELEGRAM_API = 'https://api.telegram.org';
@@ -2396,7 +2396,7 @@ async function miniAdminMedia(request, env, user) {
 }
 function miniHtmlResponse() {
   return new Response(MINI_APP_HTML, { headers: {
-    'content-type':'text/html; charset=utf-8', 'cache-control':'public, max-age=300', 'x-content-type-options':'nosniff',
+    'content-type':'text/html; charset=utf-8', 'cache-control':'no-store, max-age=0', 'x-content-type-options':'nosniff',
     'referrer-policy':'no-referrer', 'permissions-policy':'camera=(), microphone=(), geolocation=()',
     'content-security-policy':"default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https:; font-src 'self' data:; base-uri 'none'; form-action 'none'",
     'x-web-doctor-signature':signature()
