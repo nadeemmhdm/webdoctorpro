@@ -1,0 +1,39 @@
+name: WEB DOCTOR PRO v1.5.0 Upgrade
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/upgrade-v150.yml
+      - .github/scripts/upgrade-v150.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply guarded v1.5 patch
+        run: python .github/scripts/upgrade-v150.py
+      - name: Test and syntax check
+        run: |
+          npm test
+          npm run check
+          test "$(node -p "require('./package.json').version")" = "1.5.0"
+          grep -q "const VERSION = '1.5.0'" src/index.js
+          grep -q "smtp.gmail.com" src/index.js
+          grep -q "monitorWebsiteChanges" src/index.js
+          grep -q "WEB DOCTOR Health Score" src/lib.js
+      - name: Commit production source
+        run: |
+          rm -f .github/workflows/upgrade-v150.yml .github/scripts/upgrade-v150.py
+          git config user.name "Nadeem"
+          git config user.email "160517299+nadeemmhdm@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: WEB DOCTOR PRO v1.5 smart monitoring health email and registration controls"
+          git push
