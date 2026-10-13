@@ -56,7 +56,7 @@ test('v1.3.1 fixes Stars checkout, admin lock, gifts and persistent DNS proof', 
 test('v1.4.0 team workspace and button UX markers', async () => {
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
   const migration = await readFile(new URL('../migrations/0006_team_plan_and_button_ux.sql', import.meta.url), 'utf8');
-  assert.ok(source.includes("const VERSION = '1.5.1'"));
+  assert.ok(source.includes("const VERSION = '1.6.0'"));
   assert.ok(source.includes("team: { label: 'Team', stars: 299"));
   assert.ok(source.includes('TEAM_ACTIVATION_TTL_MS = 24 * 3600000'));
   assert.ok(source.includes('activateTeamWorkspace'));
@@ -71,7 +71,7 @@ test('v1.4.0 team workspace and button UX markers', async () => {
 
 test('HTTP 530 fast-fails as invalid domain before checks', async () => {
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
-  assert.ok(source.includes("const VERSION = '1.5.1'"));
+  assert.ok(source.includes("const VERSION = '1.6.0'"));
   assert.ok(source.includes('async function isHttp530Domain(domain)'));
   assert.ok(source.includes('return r.status === 530'));
   assert.ok(source.includes('if (await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));'));
@@ -82,7 +82,7 @@ test('HTTP 530 fast-fails as invalid domain before checks', async () => {
 test('v1.5 monitoring health email and registration controls are wired', async () => {
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
   const lib = await readFile(new URL('../src/lib.js', import.meta.url), 'utf8');
-  assert.match(source, /const VERSION = '1\.5\.1'/);
+  assert.match(source, /const VERSION = '1\.6\.0'/);
   assert.match(source, /UPTIME_CONFIRM_FAILURES = 2/);
   assert.match(source, /monitorWebsiteChanges/);
   assert.match(source, /website_change_events/);
@@ -100,11 +100,31 @@ test('v1.5 monitoring health email and registration controls are wired', async (
 
 test('v1.5.1 verified pending commands and global SMTP sender UX are wired', async () => {
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
-  assert.ok(source.includes("const VERSION = '1.5.1'"));
+  assert.ok(source.includes("const VERSION = '1.6.0'"));
   assert.ok(source.includes("['/verified','/pending','/pwnding'].includes(cmd)"));
   assert.ok(source.includes("command: 'verified'"));
   assert.ok(source.includes("command: 'pending'"));
   assert.ok(source.includes('filteredSitesView'));
   assert.ok(source.includes('Global Email Notification Sender'));
   assert.ok(source.includes('single WEB DOCTOR PRO admin Gmail SMTP account'));
+});
+
+
+test('v1.6 Telegram Mini App keeps bot engine parity and authenticated admin dashboard', async () => {
+  const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
+  const mini = await readFile(new URL('../src/miniapp.js', import.meta.url), 'utf8');
+  assert.ok(source.includes("const VERSION = '1.6.0'"));
+  assert.ok(source.includes("import { MINI_APP_HTML } from './miniapp.js'"));
+  assert.ok(source.includes('validateMiniAppInitData'));
+  assert.ok(source.includes("request.headers.get('x-telegram-init-data')"));
+  assert.ok(source.includes("url.pathname === '/app'"));
+  assert.ok(source.includes("url.pathname === '/api/mini/bootstrap'"));
+  assert.ok(source.includes("url.pathname === '/api/mini/action'"));
+  assert.ok(source.includes("url.pathname === '/api/mini/admin/media'"));
+  assert.ok(source.includes("setChatMenuButton"));
+  assert.ok(source.includes("await handleCommand(env, msg, user)"));
+  assert.match(mini, /telegram-web-app\.js/);
+  assert.match(mini, /Admin dashboard/);
+  assert.match(mini, /Website manager/);
+  assert.match(mini, /Command console/);
 });
