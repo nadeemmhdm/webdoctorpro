@@ -2352,6 +2352,13 @@ async function miniAdminManage(env, user, body) {
   }
   if (action === 'broadcast_queue') { const id=Number(body.id); if(!id) throw miniError('Invalid broadcast.'); await env.DB.prepare("UPDATE broadcasts SET status='queued',cursor_user_id=0,updated_at=? WHERE id=? AND status='draft'").bind(nowIso(),id).run(); return {ok:true}; }
   if (action === 'broadcast_delete') { const id=Number(body.id); if(!id) throw miniError('Invalid broadcast.'); await env.DB.prepare("DELETE FROM broadcasts WHERE id=? AND status='draft'").bind(id).run(); return {ok:true}; }
+  if (action === 'ad_create_text') {
+    const title = short(String(body.title || 'Sponsored'), 120), text = short(String(body.text || ''), 4096);
+    if (!text) throw miniError('Ad text is required.');
+    const buttons = parseButtonsSpec(String(body.buttons || ''));
+    const r = await env.DB.prepare(`INSERT INTO ads(title,content_type,text_content,telegram_file_id,buttons_json,active,impressions,created_at,updated_at) VALUES(?,'text',?,NULL,?,0,0,?,?)`).bind(title,text,JSON.stringify(buttons),nowIso(),nowIso()).run();
+    return { ok:true, id:Number(r.meta?.last_row_id || 0) };
+  }
   if (action === 'ad_toggle') { const id=Number(body.id); if(!id) throw miniError('Invalid ad.'); await env.DB.prepare('UPDATE ads SET active=CASE WHEN active=1 THEN 0 ELSE 1 END,updated_at=? WHERE id=?').bind(nowIso(),id).run(); return {ok:true}; }
   if (action === 'ad_delete') { const id=Number(body.id); if(!id) throw miniError('Invalid ad.'); await env.DB.prepare('DELETE FROM ads WHERE id=?').bind(id).run(); return {ok:true}; }
   throw miniError('Unsupported admin dashboard action.');

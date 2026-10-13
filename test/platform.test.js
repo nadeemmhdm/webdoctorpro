@@ -127,4 +127,10 @@ test('v1.6 Telegram Mini App keeps bot engine parity and authenticated admin das
   assert.match(mini, /Admin dashboard/);
   assert.match(mini, /Website manager/);
   assert.match(mini, /Command console/);
+  assert.match(source, /ad_create_text/);
+  assert.match(mini, /Create broadcast draft/);
+  assert.match(mini, /Create sponsored ad/);
+  assert.match(mini, /broadcast_queue/);
+  assert.match(mini, /ad_toggle/);
+  assert.match(mini, /adminMedia/);
 });
