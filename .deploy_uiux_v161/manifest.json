@@ -1,0 +1,14 @@
+{
+  "old_commit": "a882669ecf3efec7182942a63ec0cf9dabad5866",
+  "new_commit": "b8625883d13463c3d0cc7364a8d488e71cc7cdee",
+  "old_sha256": "a141624401a383f6fcdd643f0d100ec80c84e87f4d774b15a4c337b36c42117a",
+  "new_sha256": "2712c0291cc9eff2a10371461355d4a85a790ed4f577d88e1e9e062c89ec453e",
+  "old_bytes": 41339,
+  "new_bytes": 54840,
+  "old_lines": 182,
+  "new_lines": 201,
+  "ops": 15,
+  "gzip_bytes": 6540,
+  "base64_chars": 8720,
+  "chunks": 2
+}
