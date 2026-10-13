@@ -4,11 +4,11 @@ import {
   parseCertSpotter, fallbackKeywords, normalizeTxtRecord, parsePageSpeed, scheduleIntervalMs, buildReportPdf
 } from './lib.js';
 
-const VERSION = '1.4.0';
+const VERSION = '1.4.1';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
-const LAST_UPDATED_AT = '2026-10-13T07:02:00+05:30';
+const LAST_UPDATED_AT = '2026-10-13T07:18:00+05:30';
 const ALERT_DAYS = [30, 14, 7, 3, 1, 0];
 const TELEGRAM_API = 'https://api.telegram.org';
 const MAX_HTML_BYTES = 700_000;
@@ -810,6 +810,21 @@ async function fetchText(url, maxBytes = MAX_HTML_BYTES, opts = {}) {
   const text = await readTextLimited(r, maxBytes);
   return { status: r.status, url: r.url, text, headers: Object.fromEntries(r.headers.entries()) };
 }
+async function isHttp530Domain(domain) {
+  try {
+    const r = await fetch(`https://${domain}`, {
+      method: 'GET', redirect: 'follow',
+      headers: { Range: 'bytes=0-0', 'user-agent': `WEB-DOCTOR-PRO/${VERSION}` },
+      signal: AbortSignal.timeout(10000)
+    });
+    try { await r.body?.cancel(); } catch { /* ignore */ }
+    return r.status === 530;
+  } catch { return false; }
+}
+function invalidDomain530Text(domain) {
+  return `❌ <b>Invalid domain</b>\n\n🌐 ${esc(domain)}`;
+}
+
 async function websiteSnapshot(domain) {
   const [page, ns, cname] = await Promise.all([
     fetchText(`https://${domain}`), dnsLookup(domain, 'NS'), dnsLookup(domain, 'CNAME')
@@ -1135,7 +1150,8 @@ function fullScanSummary(report) {
   const speed = report.pageSpeed?.performance == null ? 'N/A' : `${report.pageSpeed.performance}/100`;
   return `🧪 <b>Full Scan Complete</b>\n\n🌐 <b>${esc(report.domain)}</b>\n📈 SEO: <b>${report.seo.score}/100</b> — ${scoreLabel(report.seo.score)}\n🌍 GEO: <b>${report.geoAeo.geoScore}/100</b>\n💬 AEO: <b>${report.geoAeo.aeoScore}/100</b>\n⚡ Mobile performance: <b>${speed}</b>\n🔗 Broken links: <b>${report.links.broken.length}</b> / ${report.links.checked} checked\n📄 robots.txt: ${report.robots.exists ? '✅' : '❌'}  •  Sitemap: ${report.sitemap.exists ? '✅' : '❌'}\n\n📑 <b>Signed PDF report:</b> ${esc(report.reportId)}\n💡 The PDF includes prioritized improvements, keyword opportunities, provider details, expiry data and connected Google metrics when available.`;
 }
-async function runFullScan(env, chatId, user, domain, { silentProgress = false, scheduled = false } = {}) {
+async function runFullScan(env, chatId, user, domain, { silentProgress = false, scheduled = false, preflightDone = false } = {}) {
+  if (!preflightDone && await isHttp530Domain(domain)) { await send(env, chatId, invalidDomain530Text(domain)); return null; }
   let msg = null;
   if (!silentProgress) msg = await startProgress(env, chatId, `Scanning ${domain}`, 'Starting full website audit…');
   const onProgress = silentProgress ? async () => {} : async (step, total, detail) => updateProgress(env, chatId, msg.message_id, `Scanning ${domain}`, step, total, detail);
@@ -1191,11 +1207,13 @@ async function keywordsText(env, user, domain) {
 
 async function runTool(env, chatId, user, action, domain) {
   if (!(await requireTimezone(env, chatId, user))) return;
+  if (await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));
   const usage = await consumeUsage(env, user, { report: action === 'scan' });
   if (!usage.ok) return send(env, chatId, `🚦 <b>Daily limit reached</b>\n\n${esc(usage.reason)}\nCurrent plan: <b>${esc(PLAN_CONFIG[usage.plan].label)}</b>\n\nUse /plans to compare limits or upgrade.` , { reply_markup: plansMarkup() });
   user = usage.user || user;
   if (action === 'scan') {
-    const result = await runFullScan(env, chatId, user, domain);
+    const result = await runFullScan(env, chatId, user, domain, { preflightDone: true });
+    if (!result) return null;
     await maybeServeAd(env, user, chatId).catch(() => null);
     return result;
   }
@@ -1222,6 +1240,10 @@ async function runTool(env, chatId, user, action, domain) {
     await maybeServeAd(env, user, chatId).catch(() => null);
     return text;
   } catch (e) {
+    if (e?.status === 530 || /HTTP 530/i.test(String(e?.message || ''))) {
+      await edit(env, chatId, msg.message_id, invalidDomain530Text(domain));
+      return null;
+    }
     await edit(env, chatId, msg.message_id, `⚠️ <b>Check could not finish</b>\n\n🌐 ${esc(domain)}\n${esc(short(e.message, 500))}`);
     return null;
   }

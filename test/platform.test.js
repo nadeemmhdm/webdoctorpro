@@ -56,7 +56,7 @@ test('v1.3.1 fixes Stars checkout, admin lock, gifts and persistent DNS proof', 
 test('v1.4.0 team workspace and button UX markers', async () => {
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
   const migration = await readFile(new URL('../migrations/0006_team_plan_and_button_ux.sql', import.meta.url), 'utf8');
-  assert.ok(source.includes("const VERSION = '1.4.0'"));
+  assert.ok(source.includes("const VERSION = '1.4.1'"));
   assert.ok(source.includes("team: { label: 'Team', stars: 299"));
   assert.ok(source.includes('TEAM_ACTIVATION_TTL_MS = 24 * 3600000'));
   assert.ok(source.includes('activateTeamWorkspace'));
@@ -66,4 +66,14 @@ test('v1.4.0 team workspace and button UX markers', async () => {
   assert.ok(source.includes('Ownership already verified'));
   assert.match(migration, /CREATE TABLE IF NOT EXISTS team_activation_codes/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS team_chats/);
+});
+
+
+test('HTTP 530 fast-fails as invalid domain before checks', async () => {
+  const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
+  assert.ok(source.includes("const VERSION = '1.4.1'"));
+  assert.ok(source.includes('async function isHttp530Domain(domain)'));
+  assert.ok(source.includes('return r.status === 530'));
+  assert.ok(source.includes('if (await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));'));
+  assert.ok(source.includes('❌ <b>Invalid domain</b>'));
 });
