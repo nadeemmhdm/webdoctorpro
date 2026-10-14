@@ -5,12 +5,12 @@ import {
 } from './lib.js';
 import { MINI_APP_HTML } from './miniapp.js';
 
-const VERSION = '1.6.3';
+const VERSION = '1.7.0';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
 const MINI_APP_URL = `${PUBLIC_BASE_URL}/app?rev=20261013-2`;
-const LAST_UPDATED_AT = '2026-10-13T09:40:00+05:30';
+const LAST_UPDATED_AT = '2026-10-14T09:45:00+05:30';
 const ALERT_DAYS = [30, 14, 7, 3, 1, 0];
 const TELEGRAM_API = 'https://api.telegram.org';
 const MAX_HTML_BYTES = 700_000;
@@ -362,10 +362,10 @@ async function handleTeamChatUpdate(env, msg) {
   if (!text) return;
   const [rawCmd, ...args] = text.split(/\s+/), cmd = rawCmd.toLowerCase().split('@')[0];
   if (cmd === '/team' || cmd === '/team_status' || cmd === '/status') return send(env, chatId, await teamWorkspaceStatusText(env, access));
-  if (cmd === '/help') return send(env, chatId, '🏢 <b>Team commands</b>\n\n/check domain\n/scan domain\n/seo domain\n/performance domain\n/ssl domain\n/provider domain\n/links domain\n/robots domain\n/keywords domain\n/add domain\n/verify domain\n/schedule domain weekly\n/score domain\n/compare domain\n/fix domain\n/emergency domain\n/list\n/remove domain\n/team_status\n\nTeam usage, verified sites and limits are shared through the purchaser account.');
+  if (cmd === '/help') return send(env, chatId, '🏢 <b>Team commands</b>\n\n/check domain\n/scan domain\n/seo domain\n/performance domain\n/ssl domain\n/provider domain\n/links domain\n/robots domain\n/keywords domain\n/mail domain\n/add domain\n/verify domain\n/schedule domain weekly\n/score domain\n/compare domain\n/fix domain\n/emergency domain\n/list\n/remove domain\n/team_status\n\nTeam usage, verified sites and limits are shared through the purchaser account.');
   if (cmd === '/plans') return send(env, chatId, plansText(access.owner));
   if (['/score','/compare','/fix','/emergency'].includes(cmd)) { if(!args[0]) return send(env,chatId,`💡 Usage: <code>${cmd} example.com</code>`); let domain; try{domain=normalizeDomain(args[0]);}catch{return send(env,chatId,'❌ Invalid domain.');} if(cmd==='/score') return send(env,chatId,await healthScoreText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); if(cmd==='/compare') return send(env,chatId,await compareText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); if(cmd==='/fix') return send(env,chatId,await fixesText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); return send(env,chatId,await emergencyDoctor(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); }
-  const toolMap = { '/check':'check','/scan':'scan','/seo':'seo','/performance':'performance','/ssl':'ssl','/provider':'provider','/links':'links','/robots':'robots','/keywords':'keywords' };
+  const toolMap = { '/check':'check','/scan':'scan','/seo':'seo','/performance':'performance','/ssl':'ssl','/provider':'provider','/links':'links','/robots':'robots','/keywords':'keywords','/mail':'mail' };
   if (toolMap[cmd]) {
     if (!args[0]) return send(env, chatId, '💡 Add a domain after the command. Example: <code>/check example.com</code>');
     let domain; try { domain = normalizeDomain(args[0]); } catch { return send(env, chatId, '❌ Invalid domain.'); }
@@ -1056,6 +1056,7 @@ async function syncBotProfile(env) {
       { command: 'links', description: '🔗 Detect broken internal links' },
       { command: 'robots', description: '📄 Robots.txt & sitemap analysis' },
       { command: 'keywords', description: '✨ Keyword opportunities' },
+      { command: 'mail', description: '📧 Mail DNS & authentication health' },
       { command: 'add', description: '🛡 Verify ownership & monitor' },
       { command: 'verify', description: '🔄 Verify DNS ownership record' },
       { command: 'schedule', description: '🗓 Schedule signed PDF reports' },
@@ -1140,6 +1141,78 @@ async function dnsLookup(domain, type) {
     const data = await r.json();
     return (data.Answer || []).filter((x) => x?.data).map((x) => type === 'TXT' ? normalizeTxtRecord(x.data) : String(x.data).replace(/\.$/, ''));
   } catch { return []; }
+}
+
+function parseMxRecord(value) {
+  const raw = String(value || '').trim();
+  const m = raw.match(/^(\d+)\s+(.+)$/);
+  return { priority: m ? Number(m[1]) : 0, host: String(m ? m[2] : raw).replace(/\.$/, '').toLowerCase() };
+}
+function mailTag(record, key) {
+  const m = String(record || '').match(new RegExp(`(?:^|;)\\s*${key}\\s*=\\s*([^;]+)`, 'i'));
+  return m ? m[1].trim() : null;
+}
+function mailScoreLabel(score) { return score >= 90 ? '🟢 Excellent' : score >= 75 ? '🟢 Good' : score >= 55 ? '🟡 Needs attention' : '🔴 Critical'; }
+async function discoverDkim(domain) {
+  const selectors = ['default','google','selector1','selector2','mail','dkim'];
+  const found = [];
+  await Promise.all(selectors.map(async (selector) => {
+    const name = `${selector}._domainkey.${domain}`;
+    const [txt, cname] = await Promise.all([dnsLookup(name, 'TXT'), dnsLookup(name, 'CNAME')]);
+    if (txt.some((x) => /v=dkim1|\bp=/i.test(x)) || cname.length) found.push(selector);
+  }));
+  return [...new Set(found)].sort();
+}
+async function mailHealthReport(domain) {
+  const [mxRaw, rootTxt, dmarcTxt, mtaStsTxt, tlsRptTxt, dkim] = await Promise.all([
+    dnsLookup(domain, 'MX'),
+    dnsLookup(domain, 'TXT'),
+    dnsLookup(`_dmarc.${domain}`, 'TXT'),
+    dnsLookup(`_mta-sts.${domain}`, 'TXT'),
+    dnsLookup(`_smtp._tls.${domain}`, 'TXT'),
+    discoverDkim(domain)
+  ]);
+  const mx = mxRaw.map(parseMxRecord).filter((x) => x.host).sort((a,b) => a.priority - b.priority || a.host.localeCompare(b.host));
+  const spf = rootTxt.filter((x) => /^v=spf1\b/i.test(x));
+  const dmarc = dmarcTxt.filter((x) => /^v=dmarc1\b/i.test(x));
+  const mtaSts = mtaStsTxt.filter((x) => /^v=stsv1\b/i.test(x));
+  const tlsRpt = tlsRptTxt.filter((x) => /^v=tlsrptv1\b/i.test(x));
+  const mxHosts = await Promise.all(mx.slice(0, 8).map(async (record) => {
+    const [a, aaaa] = await Promise.all([dnsLookup(record.host, 'A'), dnsLookup(record.host, 'AAAA')]);
+    return { ...record, a: stableValues(a), aaaa: stableValues(aaaa), resolves: Boolean(a.length || aaaa.length) };
+  }));
+  const resolved = mxHosts.filter((x) => x.resolves).length;
+  const issues = [], notes = [];
+  let score = 0;
+  if (mx.length) score += 35; else issues.push('🔴 No MX record found — incoming mail cannot be routed normally.');
+  if (mx.length && resolved === mxHosts.length) score += 15;
+  else if (resolved > 0) { score += 8; issues.push(`🟡 Only ${resolved}/${mxHosts.length} checked MX hosts resolve to an IP address.`); }
+  else if (mx.length) issues.push('🔴 None of the checked MX hosts resolve to A/AAAA records.');
+  if (spf.length === 1) score += 20;
+  else if (!spf.length) issues.push('🟡 SPF record is missing.');
+  else { score += 5; issues.push('🔴 Multiple SPF records detected; publish a single SPF policy.'); }
+  let dmarcPolicy = null;
+  if (dmarc.length) {
+    dmarcPolicy = String(mailTag(dmarc[0], 'p') || 'none').toLowerCase();
+    score += dmarcPolicy === 'reject' || dmarcPolicy === 'quarantine' ? 20 : 12;
+    if (dmarcPolicy === 'none') issues.push('🟡 DMARC is monitoring-only (p=none); spoofing protection is limited.');
+  } else issues.push('🟡 DMARC record is missing.');
+  if (mtaSts.length) score += 5; else notes.push('MTA-STS is not configured.');
+  if (tlsRpt.length) score += 5; else notes.push('TLS-RPT is not configured.');
+  if (!dkim.length) notes.push('DKIM selector was not auto-discovered; this alone does not mean DKIM is missing.');
+  score = clamp100(score);
+  return { domain, score, mx, mxHosts, resolved, spf, dmarc, dmarcPolicy, dkim, mtaSts, tlsRpt, issues, notes };
+}
+async function mailHealthText(domain) {
+  const r = await mailHealthReport(domain);
+  const mxText = r.mx.length ? r.mx.slice(0, 6).map((x) => `${x.priority} ${x.host}`).join('\n') : '—';
+  const status = (ok, yes='✅', no='❌') => ok ? yes : no;
+  const spfState = r.spf.length === 1 ? '✅ Valid record found' : r.spf.length > 1 ? `❌ ${r.spf.length} SPF records` : '⚠️ Missing';
+  const dmarcState = r.dmarc.length ? `✅ ${esc(r.dmarcPolicy || 'present')}` : '⚠️ Missing';
+  const dkimState = r.dkim.length ? `✅ ${esc(r.dkim.join(', '))}` : 'ℹ️ Not auto-discovered';
+  const findings = r.issues.length ? `\n\n<b>Findings</b>\n${r.issues.map(esc).join('\n')}` : '\n\n✅ <b>No major mail DNS issues detected.</b>';
+  const notes = r.notes.length ? `\n\n<b>Hardening</b>\n${r.notes.map((x) => `• ${esc(x)}`).join('\n')}` : '';
+  return `📧 <b>Mail Health — ${esc(domain)}</b>\n\n<b>MAIL HEALTH SCORE: ${r.score}/100</b> ${mailScoreLabel(r.score)}\n\n📬 <b>MX</b> ${status(r.mx.length)} ${r.mx.length ? `${r.mx.length} record(s)` : 'Missing'}\n🧭 <b>MX host resolution</b> ${status(r.mx.length && r.resolved === r.mxHosts.length)} ${r.resolved}/${r.mxHosts.length || 0}\n🛡 <b>SPF</b> ${spfState}\n🔐 <b>DMARC</b> ${dmarcState}\n✍️ <b>DKIM</b> ${dkimState}\n🔒 <b>MTA-STS</b> ${r.mtaSts.length ? '✅ Present' : '⚪ Not configured'}\n📨 <b>TLS-RPT</b> ${r.tlsRpt.length ? '✅ Present' : '⚪ Not configured'}\n\n<b>MX servers</b>\n${esc(mxText)}${findings}${notes}\n\n<i>This checks mail DNS/authentication health. It does not prove that a specific mailbox can send or receive messages.</i>`;
 }
 
 async function readTextLimited(response, maxBytes = MAX_HTML_BYTES) {
@@ -1564,7 +1637,7 @@ async function keywordsText(env, user, domain) {
 
 async function runTool(env, chatId, user, action, domain) {
   if (!(await requireTimezone(env, chatId, user))) return;
-  if (await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));
+  if (action !== 'mail' && await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));
   const usage = await consumeUsage(env, user, { report: action === 'scan' });
   if (!usage.ok) return send(env, chatId, `🚦 <b>Daily limit reached</b>\n\n${esc(usage.reason)}\nCurrent plan: <b>${esc(PLAN_CONFIG[usage.plan].label)}</b>\n\nUse /plans to compare limits or upgrade.` , { reply_markup: plansMarkup() });
   user = usage.user || user;
@@ -1574,7 +1647,7 @@ async function runTool(env, chatId, user, action, domain) {
     await maybeServeAd(env, user, chatId).catch(() => null);
     return result;
   }
-  const titleMap = { check: 'Quick website check', seo: 'SEO / GEO / AEO audit', performance: 'Performance analysis', ssl: 'Certificate check', provider: 'Provider detection', links: 'Broken-link scan', robots: 'Robots and sitemap analysis', keywords: 'Keyword research' };
+  const titleMap = { check: 'Quick website check', seo: 'SEO / GEO / AEO audit', performance: 'Performance analysis', ssl: 'Certificate check', provider: 'Provider detection', links: 'Broken-link scan', robots: 'Robots and sitemap analysis', keywords: 'Keyword research', mail: 'Mail health monitor' };
   const msg = await startProgress(env, chatId, `${titleMap[action] || 'Website check'} — ${domain}`, 'Collecting website signals…');
   try {
     await updateProgress(env, chatId, msg.message_id, `${titleMap[action] || 'Website check'} — ${domain}`, 1, 3, 'Checking live website data…');
@@ -1586,6 +1659,7 @@ async function runTool(env, chatId, user, action, domain) {
     if (action === 'provider') text = await providerText(domain);
     if (action === 'links') text = await linksText(domain);
     if (action === 'robots') text = await robotsText(domain);
+    if (action === 'mail') text = await mailHealthText(domain);
     if (action === 'keywords') {
       await updateProgress(env, chatId, msg.message_id, `${titleMap[action]} — ${domain}`, 2, 3, 'Preparing focused keyword opportunities…');
       text = await keywordsText(env, user, domain);
@@ -2257,7 +2331,7 @@ const MINI_USER_COMMANDS = new Set([
   '/start','/about','/help','/timezone','/time','/status','/settings','/plans','/plan','/subscribe',
   '/team','/team_status','/team_code','/team_activate','/email','/score','/compare','/fix','/emergency',
   '/gift','/invite','/coins','/coupon','/check','/scan','/seo','/performance','/ssl','/provider','/links',
-  '/robots','/keywords','/add','/verify','/schedule','/google_setup','/google','/google_disconnect','/analytics',
+  '/robots','/keywords','/mail','/add','/verify','/schedule','/google_setup','/google','/google_disconnect','/analytics',
   '/list','/verified','/pending','/pwnding','/remove'
 ]);
 
