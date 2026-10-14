@@ -85,37 +85,29 @@ if anchor not in s:
     raise SystemExit('readTextLimited anchor missing')
 s = s.replace(anchor, mail_code + anchor, 1)
 
-# Mini App command allowlist.
 s = s.replace("'/robots','/keywords','/add'", "'/robots','/keywords','/mail','/add'", 1)
 
-# Telegram command menu.
 menu_old = "      { command: 'keywords', description: '✨ Keyword opportunities' },\n      { command: 'add', description: '🛡 Verify ownership & monitor' },"
 menu_new = "      { command: 'keywords', description: '✨ Keyword opportunities' },\n      { command: 'mail', description: '📧 Mail DNS & authentication health' },\n      { command: 'add', description: '🛡 Verify ownership & monitor' },"
 if menu_old not in s:
     raise SystemExit('bot command menu anchor missing')
 s = s.replace(menu_old, menu_new, 1)
 
-# Team help.
 s = s.replace('/robots domain\\n/keywords domain\\n/add domain', '/robots domain\\n/keywords domain\\n/mail domain\\n/add domain', 1)
 
-# Both private and Team tool maps.
 old_map = "const toolMap = { '/check':'check','/scan':'scan','/seo':'seo','/performance':'performance','/ssl':'ssl','/provider':'provider','/links':'links','/robots':'robots','/keywords':'keywords' };"
 new_map = "const toolMap = { '/check':'check','/scan':'scan','/seo':'seo','/performance':'performance','/ssl':'ssl','/provider':'provider','/links':'links','/robots':'robots','/keywords':'keywords','/mail':'mail' };"
 count = s.count(old_map)
-if count < 2:
-    raise SystemExit(f'expected at least 2 tool maps, found {count}')
+if count < 1:
+    raise SystemExit('shared tool map not found')
 s = s.replace(old_map, new_map)
 
-# Mail checks are DNS-only and must not be rejected by an unrelated website HTTP 530.
 s = s.replace("  if (await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));", "  if (action !== 'mail' && await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));", 1)
-
-# Tool title and dispatch.
 s = s.replace("keywords: 'Keyword research' };", "keywords: 'Keyword research', mail: 'Mail health monitor' };", 1)
 s = s.replace("    if (action === 'robots') text = await robotsText(domain);\n    if (action === 'keywords') {", "    if (action === 'robots') text = await robotsText(domain);\n    if (action === 'mail') text = await mailHealthText(domain);\n    if (action === 'keywords') {", 1)
 
 p.write_text(s)
 
-# Mini App Tools grid.
 m = Path('src/miniapp.js')
 ms = m.read_text()
 old_tools = "['✨','Keywords','Opportunities','/keywords'],['❤️','Health Score','Latest score','/score']"
