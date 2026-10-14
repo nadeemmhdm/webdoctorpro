@@ -16,6 +16,19 @@ jobs:
           node-version: '24'
       - name: Apply Mail Health patch
         run: python3 scripts/add_mail_health_v170.py
+      - name: Update HTTP 530 regression assertion for DNS-only mail checks
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('test/platform.test.js')
+          s=p.read_text()
+          old="assert.ok(source.includes('if (await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));'))"
+          new="assert.ok(source.includes(\"if (action !== 'mail' && await isHttp530Domain(domain)) return send(env, chatId, invalidDomain530Text(domain));\"))"
+          if old not in s:
+              raise SystemExit('HTTP 530 assertion marker missing')
+          p.write_text(s.replace(old,new,1))
+          PY
       - name: Validate
         run: |
           node --check src/index.js
