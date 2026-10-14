@@ -31,6 +31,7 @@ t = Path('test/platform.test.js')
 ts = t.read_text()
 ts = ts.replace("const VERSION = '1.7.0'", "const VERSION = '1.7.1'")
 ts = ts.replace("const VERSION = '1\\.7\\.0'", "const VERSION = '1\\.7\\.1'")
+ts = ts.replace("'/robots','/keywords','/mail','/add'", "'/robots','/keywords','/mail','/main','/add'")
 ts += """
 
 test('v1.7.1 accepts /main as a safe alias for /mail', async () => {
