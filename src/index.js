@@ -5,7 +5,7 @@ import {
 } from './lib.js';
 import { MINI_APP_HTML } from './miniapp.js';
 
-const VERSION = '1.7.1';
+const VERSION = '1.7.2';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
@@ -1986,10 +1986,11 @@ async function handleCommand(env, msg, user) {
   }
   if (cmd === '/coupon') return void await redeemCoupon(env, chatId, user, args[0]);
 
-  if (['/check','/scan','/seo','/performance','/ssl','/provider','/links','/robots','/keywords'].includes(cmd)) {
+  if (['/check','/scan','/seo','/performance','/ssl','/provider','/links','/robots','/keywords','/mail','/main'].includes(cmd)) {
     if (!args[0]) return void await send(env, chatId, `💡 <b>Usage</b>\n<code>${cmd} example.com</code>`);
     let domain; try { domain = normalizeDomain(args[0]); } catch { return void await send(env, chatId, '❌ <b>Invalid domain</b>'); }
-    return runTool(env, chatId, user, cmd.slice(1), domain);
+    const action = cmd === '/main' ? 'mail' : cmd.slice(1);
+    return runTool(env, chatId, user, action, domain);
   }
   if (cmd === '/add') {
     if (!args[0]) return void await send(env, chatId, '💡 <b>Usage</b>\n<code>/add example.com</code>');
