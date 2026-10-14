@@ -44,7 +44,7 @@ ps=pkg.read_text().replace('"version": "1.6.2"','"version": "1.6.3"',1)
 pkg.write_text(ps)
 
 t=Path('test/platform.test.js')
-ts=t.read_text().replace('1.6.2','1.6.3')
+ts=t.read_text().replace('1.6.2','1.6.3').replace(r'1\\.6\\.2',r'1\\.6\\.3')
 ts += """
 
 test('v1.6.3 suppresses transient RDAP blanks and uses Open Mini App label', async () => {
