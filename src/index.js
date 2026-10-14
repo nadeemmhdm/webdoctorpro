@@ -5,7 +5,7 @@ import {
 } from './lib.js';
 import { MINI_APP_HTML } from './miniapp.js';
 
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
@@ -365,7 +365,7 @@ async function handleTeamChatUpdate(env, msg) {
   if (cmd === '/help') return send(env, chatId, '🏢 <b>Team commands</b>\n\n/check domain\n/scan domain\n/seo domain\n/performance domain\n/ssl domain\n/provider domain\n/links domain\n/robots domain\n/keywords domain\n/mail domain\n/add domain\n/verify domain\n/schedule domain weekly\n/score domain\n/compare domain\n/fix domain\n/emergency domain\n/list\n/remove domain\n/team_status\n\nTeam usage, verified sites and limits are shared through the purchaser account.');
   if (cmd === '/plans') return send(env, chatId, plansText(access.owner));
   if (['/score','/compare','/fix','/emergency'].includes(cmd)) { if(!args[0]) return send(env,chatId,`💡 Usage: <code>${cmd} example.com</code>`); let domain; try{domain=normalizeDomain(args[0]);}catch{return send(env,chatId,'❌ Invalid domain.');} if(cmd==='/score') return send(env,chatId,await healthScoreText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); if(cmd==='/compare') return send(env,chatId,await compareText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); if(cmd==='/fix') return send(env,chatId,await fixesText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); return send(env,chatId,await emergencyDoctor(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); }
-  const toolMap = { '/check':'check','/scan':'scan','/seo':'seo','/performance':'performance','/ssl':'ssl','/provider':'provider','/links':'links','/robots':'robots','/keywords':'keywords','/mail':'mail' };
+  const toolMap = { '/check':'check','/scan':'scan','/seo':'seo','/performance':'performance','/ssl':'ssl','/provider':'provider','/links':'links','/robots':'robots','/keywords':'keywords','/mail':'mail','/main':'mail' };
   if (toolMap[cmd]) {
     if (!args[0]) return send(env, chatId, '💡 Add a domain after the command. Example: <code>/check example.com</code>');
     let domain; try { domain = normalizeDomain(args[0]); } catch { return send(env, chatId, '❌ Invalid domain.'); }
@@ -2331,7 +2331,7 @@ const MINI_USER_COMMANDS = new Set([
   '/start','/about','/help','/timezone','/time','/status','/settings','/plans','/plan','/subscribe',
   '/team','/team_status','/team_code','/team_activate','/email','/score','/compare','/fix','/emergency',
   '/gift','/invite','/coins','/coupon','/check','/scan','/seo','/performance','/ssl','/provider','/links',
-  '/robots','/keywords','/mail','/add','/verify','/schedule','/google_setup','/google','/google_disconnect','/analytics',
+  '/robots','/keywords','/mail','/main','/add','/verify','/schedule','/google_setup','/google','/google_disconnect','/analytics',
   '/list','/verified','/pending','/pwnding','/remove'
 ]);
 
