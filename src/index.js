@@ -5,7 +5,7 @@ import {
 } from './lib.js';
 import { MINI_APP_HTML } from './miniapp.js';
 
-const VERSION = '1.6.2';
+const VERSION = '1.6.3';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
@@ -591,8 +591,14 @@ async function captureChangeSnapshot(env, domain) {
     title:seo.title||'',description:seo.description||'',hostingProvider:detectHostingProvider({headers:page.headers,cnames:cname}),dnsProvider:detectDnsProvider(ns)
   };
 }
+function stabilizeChangeSnapshot(oldSnap,newSnap){
+  const stable={...newSnap};
+  for(const key of ['registrar','domainExpiry']) if(!stable[key] && oldSnap?.[key]) stable[key]=oldSnap[key];
+  return stable;
+}
 function snapshotChangeList(oldSnap,newSnap){
   const out=[]; const add=(kind,label,a,b)=>out.push({kind,label,oldValue:String(a??''),newValue:String(b??'')});
+  const norm=(x)=>String(x||'').trim().replace(/\s+/g,' ').toLowerCase();
   const j=(x)=>JSON.stringify(x||[]);
   const dynamicEdgeProviders=new Set(['Vercel','Cloudflare','Netlify','GitHub Pages']);
   const sameEdgeProvider=Boolean(oldSnap.hostingProvider && oldSnap.hostingProvider===newSnap.hostingProvider && dynamicEdgeProviders.has(newSnap.hostingProvider));
@@ -603,8 +609,8 @@ function snapshotChangeList(oldSnap,newSnap){
   if(j(oldSnap.aaaa)!==j(newSnap.aaaa) && !suppressEdgeIpRotation) add('aaaa-record','AAAA record changed',oldSnap.aaaa?.join(', '),newSnap.aaaa?.join(', '));
   if(j(oldSnap.mx)!==j(newSnap.mx)) add('mx-record','MX record changed',oldSnap.mx?.join(', '),newSnap.mx?.join(', '));
   if(oldSnap.ssl!==newSnap.ssl) add('ssl','SSL certificate changed',oldSnap.ssl,newSnap.ssl);
-  if(oldSnap.registrar!==newSnap.registrar) add('registrar','Registrar changed',oldSnap.registrar,newSnap.registrar);
-  if(oldSnap.domainExpiry!==newSnap.domainExpiry) add('domain-expiry','Domain expiry date changed',oldSnap.domainExpiry,newSnap.domainExpiry);
+  if(oldSnap.registrar && newSnap.registrar && norm(oldSnap.registrar)!==norm(newSnap.registrar)) add('registrar','Registrar changed',oldSnap.registrar,newSnap.registrar);
+  if(oldSnap.domainExpiry && newSnap.domainExpiry && oldSnap.domainExpiry!==newSnap.domainExpiry) add('domain-expiry','Domain expiry date changed',oldSnap.domainExpiry,newSnap.domainExpiry);
   if(oldSnap.robotsHash!==newSnap.robotsHash) add('robots','robots.txt changed',oldSnap.robotsHash?'Previous version':'Missing',newSnap.robotsHash?'New version':'Missing');
   if(oldSnap.sitemapExists && !newSnap.sitemapExists) add('sitemap','Sitemap disappeared','Available','Missing');
   else if(oldSnap.sitemapHash!==newSnap.sitemapHash) add('sitemap','Sitemap changed',oldSnap.sitemapHash?'Previous version':'Missing',newSnap.sitemapHash?'New version':'Missing');
@@ -689,7 +695,9 @@ async function monitorWebsiteChanges(env){
       const snap=await captureChangeSnapshot(env,row.name); if(!snap){ await env.DB.prepare('UPDATE watches SET last_change_check_at=?,updated_at=? WHERE id=?').bind(nowIso(),nowIso(),row.watch_id).run(); continue; }
       const prevRow=await env.DB.prepare('SELECT snapshot_json FROM website_snapshots WHERE watch_id=?').bind(row.watch_id).first();
       if(prevRow){
-        const old=safeJson(prevRow.snapshot_json,{})||{}, changes=snapshotChangeList(old,snap);
+        const old=safeJson(prevRow.snapshot_json,{})||{};
+        Object.assign(snap,stabilizeChangeSnapshot(old,snap));
+        const changes=snapshotChangeList(old,snap);
         if(changes.length){
           const detected=nowIso();
           for(const c of changes) await env.DB.prepare(`INSERT INTO website_change_events(watch_id,kind,label,old_value,new_value,detected_at) VALUES(?,?,?,?,?,?)`).bind(row.watch_id,c.kind,c.label,short(c.oldValue,600),short(c.newValue,600),detected).run();
@@ -2410,7 +2418,7 @@ function miniJsonError(e) { return json({ ok:false, error:short(e?.message || 'M
 async function syncMiniAppMenu(env) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
   const current = await appMeta(env, 'telegram_miniapp_version'); if (current === VERSION) return;
-  await tg(env, 'setChatMenuButton', { menu_button: { type:'web_app', text:'🩺 Dashboard', web_app:{ url:MINI_APP_URL } } });
+  await tg(env, 'setChatMenuButton', { menu_button: { type:'web_app', text:'Open', web_app:{ url:MINI_APP_URL } } });
   await setAppMeta(env, 'telegram_miniapp_version', VERSION);
 }
 
