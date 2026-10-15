@@ -5,7 +5,7 @@ import {
 } from './lib.js';
 import { MINI_APP_HTML } from './miniapp.js';
 
-const VERSION = '1.8.1';
+const VERSION = '1.8.2';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
@@ -607,7 +607,7 @@ async function captureChangeSnapshot(env, domain) {
 }
 function stabilizeChangeSnapshot(oldSnap,newSnap){
   const stable={...newSnap};
-  for(const key of ['registrar','domainExpiry']) if(!stable[key] && oldSnap?.[key]) stable[key]=oldSnap[key];
+  for(const key of ['registrar','domainExpiry','title','description']) if(!stable[key] && oldSnap?.[key]) stable[key]=oldSnap[key];
   return stable;
 }
 function snapshotChangeList(oldSnap,newSnap){
@@ -635,8 +635,8 @@ function snapshotChangeList(oldSnap,newSnap){
       add('sitemap','Sitemap URL entries changed',`${oldCount} entr${oldCount===1?'y':'ies'} — previous set`,`${newCount} entr${newCount===1?'y':'ies'} — new set`);
     }
   }
-  if(oldSnap.title!==newSnap.title) add('title','Homepage title changed',oldSnap.title,newSnap.title);
-  if(oldSnap.description!==newSnap.description) add('meta','Homepage meta description changed',oldSnap.description,newSnap.description);
+  if(oldSnap.title && newSnap.title && oldSnap.title!==newSnap.title) add('title','Homepage title changed',oldSnap.title,newSnap.title);
+  if(oldSnap.description && newSnap.description && oldSnap.description!==newSnap.description) add('meta','Homepage meta description changed',oldSnap.description,newSnap.description);
   if(oldSnap.hostingProvider!==newSnap.hostingProvider) add('hosting','Hosting/CDN changed',oldSnap.hostingProvider,newSnap.hostingProvider);
   if(oldSnap.dnsProvider!==newSnap.dnsProvider) add('dns-provider','DNS provider changed',oldSnap.dnsProvider,newSnap.dnsProvider);
   return out;
