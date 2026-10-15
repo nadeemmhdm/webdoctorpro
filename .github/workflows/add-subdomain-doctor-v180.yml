@@ -14,6 +14,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Normalize temporary patch anchors
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/add_subdomain_doctor_v180.py')
+          t = p.read_text()
+          a = t.index('# Team help.')
+          b = t.index('# Team command routing before generic tool map.')
+          team = '''# Team help.\nbsnl = chr(92) + chr(10)\nif "/mail domain" not in s:\n    raise SystemExit('Team help anchor missing')\ns = s.replace("/mail domain", "/mail domain" + bsnl + "/subdomains domain [page]", 1)\n\n'''
+          t = t[:a] + team + t[b:]
+          a = t.index('# Private help.')
+          b = t.index('# Private command routing before existing website tool list.')
+          private = '''# Private help.\nif "/keywords example.com — keyword opportunities" not in s:\n    raise SystemExit('Private help anchor missing')\ns = s.replace("/keywords example.com — keyword opportunities", "/keywords example.com — keyword opportunities" + bsnl + "/mail example.com — mail DNS health" + bsnl + "/subdomains example.com — verified subdomain health + SEO", 1)\n\n'''
+          t = t[:a] + private + t[b:]
+          p.write_text(t)
+          PY
       - name: Apply Subdomain Doctor patch
         run: python3 scripts/add_subdomain_doctor_v180.py
       - name: Validate
