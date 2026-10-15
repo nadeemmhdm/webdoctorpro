@@ -5,12 +5,12 @@ import {
 } from './lib.js';
 import { MINI_APP_HTML } from './miniapp.js';
 
-const VERSION = '1.7.2';
+const VERSION = '1.8.0';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
-const MINI_APP_URL = `${PUBLIC_BASE_URL}/app?rev=20261013-2`;
-const LAST_UPDATED_AT = '2026-10-14T09:45:00+05:30';
+const MINI_APP_URL = `${PUBLIC_BASE_URL}/app?rev=20261015-1`;
+const LAST_UPDATED_AT = '2026-10-15T10:05:00+05:30';
 const ALERT_DAYS = [30, 14, 7, 3, 1, 0];
 const TELEGRAM_API = 'https://api.telegram.org';
 const MAX_HTML_BYTES = 700_000;
@@ -41,6 +41,9 @@ const CHANGE_CHECK_INTERVAL_MS = 15 * 60000;
 const UPTIME_CONFIRM_FAILURES = 2;
 const MONITOR_RETENTION_DAYS = 90;
 const MINI_APP_MAX_AGE_SECONDS = 86400;
+const SUBDOMAIN_PAGE_SIZE = 8;
+const SUBDOMAIN_DISCOVERY_LIMIT = 80;
+const SUBDOMAIN_COMMON_LABELS = Object.freeze(['www','mail','webmail','api','app','blog','shop','store','portal','docs','status','cdn']);
 
 function planRank(plan) { return plan === 'team' ? 3 : plan === 'pro' ? 2 : plan === 'starter' ? 1 : 0; }
 function activePlan(user) {
@@ -362,9 +365,16 @@ async function handleTeamChatUpdate(env, msg) {
   if (!text) return;
   const [rawCmd, ...args] = text.split(/\s+/), cmd = rawCmd.toLowerCase().split('@')[0];
   if (cmd === '/team' || cmd === '/team_status' || cmd === '/status') return send(env, chatId, await teamWorkspaceStatusText(env, access));
-  if (cmd === '/help') return send(env, chatId, '🏢 <b>Team commands</b>\n\n/check domain\n/scan domain\n/seo domain\n/performance domain\n/ssl domain\n/provider domain\n/links domain\n/robots domain\n/keywords domain\n/mail domain\n/add domain\n/verify domain\n/schedule domain weekly\n/score domain\n/compare domain\n/fix domain\n/emergency domain\n/list\n/remove domain\n/team_status\n\nTeam usage, verified sites and limits are shared through the purchaser account.');
+  if (cmd === '/help') return send(env, chatId, '🏢 <b>Team commands</b>\n\n/check domain\n/scan domain\n/seo domain\n/performance domain\n/ssl domain\n/provider domain\n/links domain\n/robots domain\n/keywords domain\n/mail domain\
+/subdomains domain [page]\n/add domain\n/verify domain\n/schedule domain weekly\n/score domain\n/compare domain\n/fix domain\n/emergency domain\n/list\n/remove domain\n/team_status\n\nTeam usage, verified sites and limits are shared through the purchaser account.');
   if (cmd === '/plans') return send(env, chatId, plansText(access.owner));
   if (['/score','/compare','/fix','/emergency'].includes(cmd)) { if(!args[0]) return send(env,chatId,`💡 Usage: <code>${cmd} example.com</code>`); let domain; try{domain=normalizeDomain(args[0]);}catch{return send(env,chatId,'❌ Invalid domain.');} if(cmd==='/score') return send(env,chatId,await healthScoreText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); if(cmd==='/compare') return send(env,chatId,await compareText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); if(cmd==='/fix') return send(env,chatId,await fixesText(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); return send(env,chatId,await emergencyDoctor(env,access.owner,domain),{reply_markup:healthActionButtons(domain)}); }
+  if (cmd === '/subdomains') {
+    if (!args[0]) return send(env, chatId, '💡 Usage: <code>/subdomains example.com [page]</code>');
+    let domain; try { domain = normalizeDomain(args[0]); } catch { return send(env, chatId, '❌ Invalid domain.'); }
+    const page = Math.max(1, Math.min(10, Number(args[1] || 1) || 1));
+    return runSubdomainDoctor(env, chatId, access.owner, domain, page);
+  }
   const toolMap = { '/check':'check','/scan':'scan','/seo':'seo','/performance':'performance','/ssl':'ssl','/provider':'provider','/links':'links','/robots':'robots','/keywords':'keywords','/mail':'mail','/main':'mail' };
   if (toolMap[cmd]) {
     if (!args[0]) return send(env, chatId, '💡 Add a domain after the command. Example: <code>/check example.com</code>');
@@ -1057,6 +1067,7 @@ async function syncBotProfile(env) {
       { command: 'robots', description: '📄 Robots.txt & sitemap analysis' },
       { command: 'keywords', description: '✨ Keyword opportunities' },
       { command: 'mail', description: '📧 Mail DNS & authentication health' },
+      { command: 'subdomains', description: '🔎 Verified subdomain health & SEO' },
       { command: 'add', description: '🛡 Verify ownership & monitor' },
       { command: 'verify', description: '🔄 Verify DNS ownership record' },
       { command: 'schedule', description: '🗓 Schedule signed PDF reports' },
@@ -1163,6 +1174,110 @@ async function discoverDkim(domain) {
   }));
   return [...new Set(found)].sort();
 }
+
+async function discoverCertificateSubdomains(rootDomain) {
+  const url = `https://api.certspotter.com/v1/issuances?domain=${encodeURIComponent(rootDomain)}&include_subdomains=true&expand=dns_names`;
+  const r = await fetch(url, { headers: { accept: 'application/json', 'user-agent': `WEB-DOCTOR-PRO/${VERSION}` }, signal: AbortSignal.timeout(12000) });
+  if (!r.ok) throw new Error(`Certificate transparency service returned HTTP ${r.status}`);
+  const rows = await r.json();
+  const names = new Set();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    for (const raw of Array.isArray(row?.dns_names) ? row.dns_names : []) {
+      const name = String(raw || '').trim().toLowerCase().replace(/^\*\./, '').replace(/\.$/, '');
+      if (!name || name === rootDomain || !name.endsWith(`.${rootDomain}`)) continue;
+      try { if (normalizeDomain(name) === name) names.add(name); } catch { /* ignore malformed CT names */ }
+      if (names.size >= SUBDOMAIN_DISCOVERY_LIMIT) break;
+    }
+    if (names.size >= SUBDOMAIN_DISCOVERY_LIMIT) break;
+  }
+  return [...names].sort();
+}
+
+async function discoverSubdomainCandidates(rootDomain) {
+  const ct = await discoverCertificateSubdomains(rootDomain).catch(() => []);
+  const out = [...ct];
+  const seen = new Set(out);
+  for (const label of SUBDOMAIN_COMMON_LABELS) {
+    const host = `${label}.${rootDomain}`;
+    if (!seen.has(host)) { seen.add(host); out.push(host); }
+  }
+  return { candidates: out.slice(0, SUBDOMAIN_DISCOVERY_LIMIT), ctCount: ct.length };
+}
+
+async function subdomainHealthItem(host) {
+  const [a, aaaa] = await Promise.all([dnsLookup(host, 'A'), dnsLookup(host, 'AAAA')]);
+  const dnsAnswers = stableValues([...a, ...aaaa]);
+  if (!dnsAnswers.length) return { host, dnsActive: false, dnsAnswers: [], status: null, protocol: null, seo: null, ssl: null, health: 0 };
+
+  let page = null, protocol = 'https';
+  try {
+    page = await fetchText(`https://${host}`, 280000, { signal: AbortSignal.timeout(9000) });
+  } catch {
+    protocol = 'http';
+    try { page = await fetchText(`http://${host}`, 280000, { signal: AbortSignal.timeout(9000) }); } catch { page = null; }
+  }
+
+  const httpsLive = Boolean(page && /^https:/i.test(page.url || '') && page.status < 600);
+  const ssl = httpsLive ? await sslLookup(host).catch(() => ({ expiresAt: null, issuer: null })) : { expiresAt: null, issuer: null };
+  const seo = page && page.status < 500 ? analyzeSeoHtml(page.text || '', page.url || `${protocol}://${host}`) : null;
+  const seoScore = clamp100(seo?.score ?? 0);
+  const sslDays = ssl?.expiresAt ? daysUntil(ssl.expiresAt) : null;
+  const dnsScore = 15;
+  const webScore = !page ? 0 : page.status < 400 ? 30 : page.status < 500 ? 18 : 5;
+  const sslScore = httpsLive ? (sslDays !== null && sslDays >= 1 ? 20 : ssl?.expiresAt ? 5 : 10) : 0;
+  const health = clamp100(Math.round(dnsScore + webScore + seoScore * 0.35 + sslScore));
+  return {
+    host, dnsActive: true, dnsAnswers, status: page?.status ?? null, protocol: page ? (/^https:/i.test(page.url || '') ? 'https' : protocol) : null,
+    seo: seo ? { score: seoScore, title: seo.title || '', description: seo.description || '' } : null,
+    ssl: { expiresAt: ssl?.expiresAt || null, issuer: ssl?.issuer || null, days: sslDays }, health
+  };
+}
+
+async function subdomainDoctorReport(rootDomain, requestedPage = 1) {
+  const found = await discoverSubdomainCandidates(rootDomain);
+  const totalPages = Math.max(1, Math.ceil(found.candidates.length / SUBDOMAIN_PAGE_SIZE));
+  const page = Math.max(1, Math.min(totalPages, Number(requestedPage || 1) || 1));
+  const start = (page - 1) * SUBDOMAIN_PAGE_SIZE;
+  const selected = found.candidates.slice(start, start + SUBDOMAIN_PAGE_SIZE);
+  const items = await Promise.all(selected.map((host) => subdomainHealthItem(host)));
+  return { rootDomain, page, totalPages, candidateCount: found.candidates.length, ctCount: found.ctCount, items };
+}
+
+async function subdomainDoctorText(rootDomain, requestedPage = 1) {
+  const r = await subdomainDoctorReport(rootDomain, requestedPage);
+  const active = r.items.filter((x) => x.dnsActive);
+  const lines = active.map((x, i) => {
+    const web = x.status == null ? '❌ unreachable' : `${x.protocol === 'https' ? '🔒' : '⚠️'} ${String(x.protocol || '').toUpperCase()} ${x.status}`;
+    const seo = x.seo ? `${x.seo.score}/100 • title ${x.seo.title ? '✅' : '❌'} • meta ${x.seo.description ? '✅' : '❌'}` : 'not available';
+    const ssl = x.ssl?.expiresAt ? `${x.ssl.days !== null && x.ssl.days >= 0 ? '✅' : '❌'} ${x.ssl.days === null ? 'date unavailable' : `${x.ssl.days}d`}` : (x.protocol === 'https' ? '⚪ certificate date unavailable' : '❌ no HTTPS');
+    return `${i + 1}. <b>${esc(x.host)}</b>\n   🧭 DNS ✅ • ${x.dnsAnswers.length} answer(s)\n   🌐 Web ${web}\n   ❤️ Health <b>${x.health}/100</b> ${scoreLabel(x.health)}\n   📈 SEO ${seo}\n   🔐 SSL ${ssl}`;
+  });
+  const inactive = r.items.length - active.length;
+  return `🔎 <b>Subdomain Doctor — ${esc(rootDomain)}</b>\n\n✅ Root-domain ownership verified\n🔐 Discovery: Certificate Transparency + DNS resolution\n📚 CT names found: <b>${r.ctCount}</b> • candidates: <b>${r.candidateCount}</b>\n📄 Page <b>${r.page}/${r.totalPages}</b> • checked ${r.items.length} candidate(s)\n\n${lines.length ? lines.join('\n\n') : '⚪ No active DNS-resolving subdomains on this page.'}\n\n${inactive ? `🕳 ${inactive} candidate(s) on this page did not resolve in DNS.\n` : ''}${r.totalPages > 1 ? `➡️ Next: <code>/subdomains ${esc(rootDomain)} ${Math.min(r.totalPages, r.page + 1)}</code>\n` : ''}\n💡 <i>CT logs can contain historical hostnames. Active status is confirmed separately with current DNS. SEO is an on-page check of the subdomain homepage.</i>`;
+}
+
+async function runSubdomainDoctor(env, chatId, user, rootDomain, page = 1) {
+  if (!(await requireTimezone(env, chatId, user))) return null;
+  const verified = await isVerified(env, user.id, rootDomain);
+  if (!verified) return send(env, chatId, `🔒 <b>Verified domains only</b>\n\n🌐 ${esc(rootDomain)}\n\nSubdomain discovery and scanning can expose infrastructure details, so WEB DOCTOR PRO only runs it for domains you have verified.\n\nUse <code>/add ${esc(rootDomain)}</code> first.`);
+  const usage = await consumeUsage(env, user, { report: false });
+  if (!usage.ok) return send(env, chatId, `🚦 <b>Daily limit reached</b>\n\n${esc(usage.reason)}\nCurrent plan: <b>${esc(PLAN_CONFIG[usage.plan].label)}</b>`, { reply_markup: plansMarkup() });
+  user = usage.user || user;
+  const msg = await startProgress(env, chatId, `Subdomain Doctor — ${rootDomain}`, 'Discovering certificate and DNS signals…');
+  try {
+    await updateProgress(env, chatId, msg.message_id, `Subdomain Doctor — ${rootDomain}`, 1, 3, 'Discovering subdomain candidates…');
+    await updateProgress(env, chatId, msg.message_id, `Subdomain Doctor — ${rootDomain}`, 2, 3, 'Checking DNS, web health, SSL and SEO…');
+    const text = await subdomainDoctorText(rootDomain, page);
+    await updateProgress(env, chatId, msg.message_id, `Subdomain Doctor — ${rootDomain}`, 3, 3, 'Finalizing subdomain health results…');
+    await edit(env, chatId, msg.message_id, text);
+    await maybeServeAd(env, user, chatId).catch(() => null);
+    return text;
+  } catch (e) {
+    await edit(env, chatId, msg.message_id, `⚠️ <b>Subdomain scan could not finish</b>\n\n🌐 ${esc(rootDomain)}\n${esc(short(e?.message || 'Unknown error', 500))}`);
+    return null;
+  }
+}
+
 async function mailHealthReport(domain) {
   const [mxRaw, rootTxt, dmarcTxt, mtaStsTxt, tlsRptTxt, dkim] = await Promise.all([
     dnsLookup(domain, 'MX'),
@@ -1927,7 +2042,9 @@ async function handleCommand(env, msg, user) {
     return;
   }
   if (cmd === '/about') return void await send(env, chatId, `🩺 <b>WEB DOCTOR PRO</b>\n<b>Your Website Doctor.</b>\n\nMonitor uptime, domain and certificate expiry, audit SEO/GEO/AEO, verify website ownership, and receive signed PDF reports and automatic Telegram alerts.\n\n📦 v${VERSION}\n👨‍💻 Developer: ${DEVELOPER}\n🔗 ${GITHUB_URL}`);
-  if (cmd === '/help') return void await send(env, chatId, `${welcome(user.first_name)}\n\n<b>Commands</b>\n/check example.com — quick check\n/scan example.com — full scan + signed PDF\n/seo example.com — SEO/GEO/AEO\n/performance example.com — PageSpeed\n/ssl example.com — certificate expiry\n/provider example.com — hosting/DNS/registrar\n/links example.com — broken links\n/robots example.com — robots/sitemap/llms.txt\n/keywords example.com — keyword opportunities\n/add example.com — verify + monitor\n/verify example.com — re-check DNS TXT\n/schedule example.com weekly — scheduled reports\n/score example.com — website health score\n/compare example.com — compare latest scans\n/fix example.com — top 3 fixes\n/emergency example.com — outage diagnostics\n/email you@example.com — email alerts\n/google — connect your own Google account data\n/plans — plans & Stars\n/team — Team workspace status\n/team_code — new 24-hour Team activation code\n/team_activate CODE @channel — activate a channel\n/invite — referral link\n/coins — coin balance/rewards\n/coupon CODE — redeem coupon\n/list — monitored sites\n/remove example.com — stop monitoring\n/status — bot status\n/settings — settings & usage`);
+  if (cmd === '/help') return void await send(env, chatId, `${welcome(user.first_name)}\n\n<b>Commands</b>\n/check example.com — quick check\n/scan example.com — full scan + signed PDF\n/seo example.com — SEO/GEO/AEO\n/performance example.com — PageSpeed\n/ssl example.com — certificate expiry\n/provider example.com — hosting/DNS/registrar\n/links example.com — broken links\n/robots example.com — robots/sitemap/llms.txt\n/keywords example.com — keyword opportunities\
+/mail example.com — mail DNS health\
+/subdomains example.com — verified subdomain health + SEO\n/add example.com — verify + monitor\n/verify example.com — re-check DNS TXT\n/schedule example.com weekly — scheduled reports\n/score example.com — website health score\n/compare example.com — compare latest scans\n/fix example.com — top 3 fixes\n/emergency example.com — outage diagnostics\n/email you@example.com — email alerts\n/google — connect your own Google account data\n/plans — plans & Stars\n/team — Team workspace status\n/team_code — new 24-hour Team activation code\n/team_activate CODE @channel — activate a channel\n/invite — referral link\n/coins — coin balance/rewards\n/coupon CODE — redeem coupon\n/list — monitored sites\n/remove example.com — stop monitoring\n/status — bot status\n/settings — settings & usage`);
   if (cmd === '/timezone') {
     const tz = args.join(' '); if (!tz) return void await requireTimezone(env, chatId, user);
     if (!(await setTimezone(env, user.id, tz))) return void await send(env, chatId, '❌ Invalid timezone. Example: <code>/timezone Asia/Kolkata</code>');
@@ -1986,6 +2103,12 @@ async function handleCommand(env, msg, user) {
   }
   if (cmd === '/coupon') return void await redeemCoupon(env, chatId, user, args[0]);
 
+  if (cmd === '/subdomains') {
+    if (!args[0]) return void await send(env, chatId, '💡 <b>Usage</b>\n<code>/subdomains example.com [page]</code>');
+    let domain; try { domain = normalizeDomain(args[0]); } catch { return void await send(env, chatId, '❌ <b>Invalid domain</b>'); }
+    const page = Math.max(1, Math.min(10, Number(args[1] || 1) || 1));
+    return runSubdomainDoctor(env, chatId, user, domain, page);
+  }
   if (['/check','/scan','/seo','/performance','/ssl','/provider','/links','/robots','/keywords','/mail','/main'].includes(cmd)) {
     if (!args[0]) return void await send(env, chatId, `💡 <b>Usage</b>\n<code>${cmd} example.com</code>`);
     let domain; try { domain = normalizeDomain(args[0]); } catch { return void await send(env, chatId, '❌ <b>Invalid domain</b>'); }
@@ -2332,7 +2455,7 @@ const MINI_USER_COMMANDS = new Set([
   '/start','/about','/help','/timezone','/time','/status','/settings','/plans','/plan','/subscribe',
   '/team','/team_status','/team_code','/team_activate','/email','/score','/compare','/fix','/emergency',
   '/gift','/invite','/coins','/coupon','/check','/scan','/seo','/performance','/ssl','/provider','/links',
-  '/robots','/keywords','/mail','/main','/add','/verify','/schedule','/google_setup','/google','/google_disconnect','/analytics',
+  '/robots','/keywords','/mail','/main','/subdomains','/add','/verify','/schedule','/google_setup','/google','/google_disconnect','/analytics',
   '/list','/verified','/pending','/pwnding','/remove'
 ]);
 

@@ -1,6 +1,6 @@
 {
   "name": "webdoctorpro",
-  "version": "1.7.2",
+  "version": "1.8.0",
   "private": true,
   "type": "module",
   "description": "Telegram website doctor with smart uptime/recovery alerts, change monitoring, health scoring, scan comparison, emergency diagnostics, email notifications, admin controls, plans, Team workspaces and signed PDF reports on Cloudflare Workers + D1",
