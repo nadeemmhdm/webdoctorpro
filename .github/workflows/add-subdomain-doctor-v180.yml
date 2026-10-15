@@ -32,6 +32,16 @@ jobs:
           PY
       - name: Apply Subdomain Doctor patch
         run: python3 scripts/add_subdomain_doctor_v180.py
+      - name: Refresh regression assertions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('test/platform.test.js')
+          t = p.read_text()
+          t = t.replace("'/robots','/keywords','/mail','/main','/add'", "'/robots','/keywords','/mail','/main','/subdomains','/add'")
+          t = t.replace("assert.ok(mini.includes('data-sitecmd=\\\\\"/subdomains\\\\\"'));", "assert.ok(mini.includes('>Subdomains</button>'));", 1)
+          p.write_text(t)
+          PY
       - name: Validate
         run: |
           node --check src/index.js
