@@ -204,6 +204,35 @@ export function parseSitemap(text, status = 200) {
   return { exists: true, status, urlCount, sitemapCount, type: sitemapCount ? 'index' : 'urlset' };
 }
 
+function decodeSitemapXmlText(value) {
+  return String(value || '')
+    .replace(/^<!\[CDATA\[([\s\S]*?)\]\]>$/i, '$1')
+    .replace(/&#x([0-9a-f]+);/gi, (_, x) => { try { return String.fromCodePoint(parseInt(x, 16)); } catch { return ''; } })
+    .replace(/&#(\d+);/g, (_, x) => { try { return String.fromCodePoint(parseInt(x, 10)); } catch { return ''; } })
+    .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&apos;/gi, "'")
+    .trim();
+}
+
+export function sitemapSemanticEntries(text, baseUrl = 'https://example.invalid/sitemap.xml') {
+  const body = String(text || '');
+  const type = /<sitemapindex\b/i.test(body) ? 'index' : /<urlset\b/i.test(body) ? 'urlset' : 'unknown';
+  if (type === 'unknown') return { valid: false, type, entries: [] };
+  const seen = new Set();
+  const re = /<loc\b[^>]*>([\s\S]*?)<\/loc>/gi;
+  let m;
+  while ((m = re.exec(body))) {
+    const raw = decodeSitemapXmlText(m[1]);
+    if (!raw) continue;
+    try {
+      const u = new URL(raw, baseUrl);
+      if (!['http:', 'https:'].includes(u.protocol)) continue;
+      u.hash = '';
+      seen.add(u.toString());
+    } catch { /* malformed sitemap location */ }
+  }
+  return { valid: true, type, entries: [...seen].sort() };
+}
+
 export function parseCertSpotter(issuances, domain) {
   if (!Array.isArray(issuances) || !issuances.length) return { expiresAt: null, issuer: null, source: 'Certificate Transparency' };
   const d = String(domain).toLowerCase();

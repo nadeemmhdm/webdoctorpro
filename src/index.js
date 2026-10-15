@@ -1,11 +1,11 @@
 import {
   normalizeDomain, parseRdap, daysUntil, formatInTimezone, validTimezone,
   detectDnsProvider, detectHostingProvider, analyzeSeoHtml, analyzeGeoAeo, parseRobots, parseSitemap,
-  parseCertSpotter, fallbackKeywords, normalizeTxtRecord, parsePageSpeed, scheduleIntervalMs, buildReportPdf
+  parseCertSpotter, fallbackKeywords, normalizeTxtRecord, parsePageSpeed, scheduleIntervalMs, buildReportPdf, sitemapSemanticEntries
 } from './lib.js';
 import { MINI_APP_HTML } from './miniapp.js';
 
-const VERSION = '1.8.0';
+const VERSION = '1.8.1';
 const DEVELOPER = 'Nadeem';
 const GITHUB_URL = 'https://github.com/nadeemmhdm/webdoctorpro';
 const PUBLIC_BASE_URL = 'https://webdoctorpro.nadeemmhdm-ai.workers.dev';
@@ -593,11 +593,15 @@ async function captureChangeSnapshot(env, domain) {
   ]);
   if (!page) return null;
   const seo=analyzeSeoHtml(page.text,page.url||`https://${domain}`);
+  const sitemapState = sitemap && sitemap.status < 400
+    ? sitemapSemanticEntries(sitemap.text, `https://${domain}/sitemap.xml`)
+    : { valid:false, type:'missing', entries:[] };
+  const sitemapSemanticHash = sitemapState.valid ? await sha256Text(JSON.stringify(sitemapState.entries)) : '';
   return {
     ns:stableValues(ns),a:stableValues(a),aaaa:stableValues(aaaa),mx:stableValues(mx),
     ssl:`${ssl.issuer||''}|${ssl.expiresAt||''}`,registrar:rdap.registrar||'',domainExpiry:rdap.expiresAt||'',
     robotsHash:robots?await sha256Text(robots.text):'',robotsExists:Boolean(robots&&robots.status<400),
-    sitemapHash:sitemap?await sha256Text(sitemap.text):'',sitemapExists:Boolean(sitemap&&sitemap.status<400),
+    sitemapHash:sitemapSemanticHash,sitemapSemanticHash,sitemapSemanticVersion:1,sitemapEntryCount:sitemapState.entries.length,sitemapType:sitemapState.type,sitemapExists:Boolean(sitemapState.valid),
     title:seo.title||'',description:seo.description||'',hostingProvider:detectHostingProvider({headers:page.headers,cnames:cname}),dnsProvider:detectDnsProvider(ns)
   };
 }
@@ -622,13 +626,45 @@ function snapshotChangeList(oldSnap,newSnap){
   if(oldSnap.registrar && newSnap.registrar && norm(oldSnap.registrar)!==norm(newSnap.registrar)) add('registrar','Registrar changed',oldSnap.registrar,newSnap.registrar);
   if(oldSnap.domainExpiry && newSnap.domainExpiry && oldSnap.domainExpiry!==newSnap.domainExpiry) add('domain-expiry','Domain expiry date changed',oldSnap.domainExpiry,newSnap.domainExpiry);
   if(oldSnap.robotsHash!==newSnap.robotsHash) add('robots','robots.txt changed',oldSnap.robotsHash?'Previous version':'Missing',newSnap.robotsHash?'New version':'Missing');
-  if(oldSnap.sitemapExists && !newSnap.sitemapExists) add('sitemap','Sitemap disappeared','Available','Missing');
-  else if(oldSnap.sitemapHash!==newSnap.sitemapHash) add('sitemap','Sitemap changed',oldSnap.sitemapHash?'Previous version':'Missing',newSnap.sitemapHash?'New version':'Missing');
+  const sitemapComparable=Number(oldSnap.sitemapSemanticVersion||0)>=1 && Number(newSnap.sitemapSemanticVersion||0)>=1;
+  if(sitemapComparable){
+    if(oldSnap.sitemapExists && !newSnap.sitemapExists) add('sitemap','Sitemap disappeared','Available','Missing');
+    else if(!oldSnap.sitemapExists && newSnap.sitemapExists) add('sitemap','Sitemap appeared','Missing','Available');
+    else if(oldSnap.sitemapExists && newSnap.sitemapExists && oldSnap.sitemapSemanticHash!==newSnap.sitemapSemanticHash){
+      const oldCount=Number(oldSnap.sitemapEntryCount||0),newCount=Number(newSnap.sitemapEntryCount||0);
+      add('sitemap','Sitemap URL entries changed',`${oldCount} entr${oldCount===1?'y':'ies'} — previous set`,`${newCount} entr${newCount===1?'y':'ies'} — new set`);
+    }
+  }
   if(oldSnap.title!==newSnap.title) add('title','Homepage title changed',oldSnap.title,newSnap.title);
   if(oldSnap.description!==newSnap.description) add('meta','Homepage meta description changed',oldSnap.description,newSnap.description);
   if(oldSnap.hostingProvider!==newSnap.hostingProvider) add('hosting','Hosting/CDN changed',oldSnap.hostingProvider,newSnap.hostingProvider);
   if(oldSnap.dnsProvider!==newSnap.dnsProvider) add('dns-provider','DNS provider changed',oldSnap.dnsProvider,newSnap.dnsProvider);
   return out;
+}
+function sitemapStateSignature(snap){
+  return `${snap?.sitemapExists?'1':'0'}:${snap?.sitemapSemanticHash||''}:${snap?.sitemapType||''}`;
+}
+async function confirmSitemapChanges(env,watchId,oldSnap,newSnap,changes){
+  const key=`sitemap_pending:${watchId}`;
+  const sitemapChanges=changes.filter((c)=>c.kind==='sitemap');
+  if(!sitemapChanges.length){
+    await env.DB.prepare('DELETE FROM app_meta WHERE key=?').bind(key).run().catch(()=>{});
+    return {changes,snapshot:newSnap,confirmed:false};
+  }
+  const baseline=sitemapStateSignature(oldSnap),candidate=sitemapStateSignature(newSnap);
+  let pending=null;
+  try { pending=JSON.parse((await appMeta(env,key))||'null'); } catch { pending=null; }
+  if(pending?.baseline===baseline && pending?.candidate===candidate){
+    await env.DB.prepare('DELETE FROM app_meta WHERE key=?').bind(key).run().catch(()=>{});
+    return {changes,snapshot:newSnap,confirmed:true};
+  }
+  await setAppMeta(env,key,JSON.stringify({baseline,candidate,firstSeenAt:nowIso()}));
+  const stable={...newSnap};
+  for(const field of ['sitemapHash','sitemapSemanticHash','sitemapSemanticVersion','sitemapEntryCount','sitemapType','sitemapExists']){
+    if(Object.prototype.hasOwnProperty.call(oldSnap,field)) stable[field]=oldSnap[field];
+    else delete stable[field];
+  }
+  return {changes:changes.filter((c)=>c.kind!=='sitemap'),snapshot:stable,confirmed:false};
 }
 async function smtpConfig(env) {
   const row=await env.DB.prepare('SELECT * FROM smtp_config WHERE id=1 AND active=1').first();
@@ -707,12 +743,19 @@ async function monitorWebsiteChanges(env){
       if(prevRow){
         const old=safeJson(prevRow.snapshot_json,{})||{};
         Object.assign(snap,stabilizeChangeSnapshot(old,snap));
-        const changes=snapshotChangeList(old,snap);
+        const rawChanges=snapshotChangeList(old,snap);
+        const sitemapDecision=await confirmSitemapChanges(env,row.watch_id,old,snap,rawChanges);
+        Object.assign(snap,sitemapDecision.snapshot);
+        const changes=sitemapDecision.changes;
         if(changes.length){
           const detected=nowIso();
           for(const c of changes) await env.DB.prepare(`INSERT INTO website_change_events(watch_id,kind,label,old_value,new_value,detected_at) VALUES(?,?,?,?,?,?)`).bind(row.watch_id,c.kind,c.label,short(c.oldValue,600),short(c.newValue,600),detected).run();
           const detail=changes.slice(0,8).map((c)=>`• <b>${esc(c.label)}</b>\n  Old: ${esc(short(c.oldValue||'—',140))}\n  New: ${esc(short(c.newValue||'—',140))}`).join('\n');
-          const text=`⚠️ <b>Website Change Detected</b>\n\n🌐 <b>${esc(row.name)}</b>\n${detail}\n\n🕒 ${esc(formatInTimezone(detected,row.timezone||'UTC'))}\n\n🛡 Review unexpected DNS, certificate, registrar or hosting changes promptly.`;
+          const sitemapOnly=changes.every((c)=>c.kind==='sitemap');
+          const guidance=sitemapOnly
+            ? '🗺 Sitemap changes are compared by normalized URL entries and confirmed across two checks. Timestamp, formatting and ordering-only changes are ignored.'
+            : '🛡 Review unexpected DNS, certificate, registrar or hosting changes promptly.';
+          const text=`⚠️ <b>Website Change Detected</b>\n\n🌐 <b>${esc(row.name)}</b>\n${detail}\n\n🕒 ${esc(formatInTimezone(detected,row.timezone||'UTC'))}\n\n${guidance}`;
           await send(env,row.chat_id,text).catch(()=>{});
           await sendUserEmail(env,row,`WEB DOCTOR PRO change alert — ${row.name}`,text.replace(/<[^>]+>/g,'')).catch(()=>false);
         }
