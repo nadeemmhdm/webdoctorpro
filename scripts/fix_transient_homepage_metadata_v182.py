@@ -37,6 +37,10 @@ t = Path('test/platform.test.js')
 ts = t.read_text()
 ts = ts.replace("const VERSION = '1.8.1'", "const VERSION = '1.8.2'")
 ts = ts.replace("const VERSION = '1\\.8\\.1'", "const VERSION = '1\\.8\\.2'")
+ts = ts.replace(
+    'assert.ok(source.includes("for(const key of [\'registrar\',\'domainExpiry\'])"));',
+    'assert.ok(source.includes("for(const key of [\'registrar\',\'domainExpiry\',\'title\',\'description\'])"));'
+)
 ts += """
 
 test('v1.8.2 suppresses transient blank homepage title and meta alerts', async () => {
