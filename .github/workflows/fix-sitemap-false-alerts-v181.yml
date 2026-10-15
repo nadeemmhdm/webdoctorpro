@@ -16,6 +16,17 @@ jobs:
           node-version: '24'
       - name: Apply sitemap monitor fix
         run: python3 scripts/fix_sitemap_false_alerts_v181.py
+      - name: Refresh v1.8.1 test assertions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('test/platform.test.js')
+          s = p.read_text()
+          s = re.sub(r"assert\.match\(source, /const VERSION = '[^']+'\/\);", "assert.ok(source.includes(\"const VERSION = '1.8.1'\"));", s)
+          p.write_text(s)
+          PY
       - name: Validate
         run: |
           node --check src/index.js
